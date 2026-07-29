@@ -476,6 +476,10 @@ trainer:
   log_val_generations: 0
   rollout_data_dir: null
   validation_data_dir: null
+  video_fps: 24
+  rollout_data_save_freq: 1
+  rollout_data_max_samples: null
+  validation_data_max_samples: null
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1
