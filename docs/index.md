@@ -35,6 +35,13 @@ start/metrics.md
 
 ```{toctree}
 :maxdepth: 1
+:caption: Examples
+
+examples/config.md
+```
+
+```{toctree}
+:maxdepth: 1
 :caption: Advanced Features
 
 algo/async_reward.md
