@@ -1,6 +1,6 @@
 ---
 name: commit-and-pr
-description: verl-omni commit message + PR conventions and the mandatory contribution policy. MUST load before any git commit or PR creation -- enforces the [{modules}] {type}: {description} title format, commit trailers, duplicate-work checks, and AI-assistance disclosure.
+description: "verl-omni commit message + PR conventions and the mandatory contribution policy. MUST load before any git commit or PR creation -- enforces the [{modules}] {type}: {description} title format, commit trailers, duplicate-work checks, and AI-assistance disclosure."
 ---
 
 # Commit & PR Conventions
