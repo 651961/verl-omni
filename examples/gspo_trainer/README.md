@@ -1,6 +1,6 @@
 # Qwen3-Omni Thinker GSPO Trainer
 
-Last updated: 07/29/2026
+Last updated: 08/03/2026
 
 This example shows how to post-train the **Qwen3-Omni-30B-A3B Thinker** with
 **GSPO** on a math-reasoning task, using FSDP for the actor and `vllm-omni` as
@@ -10,7 +10,7 @@ the async rollout backend. Two input modalities are supported: **text → text**
 Both **GPU** and **NPU** training platforms are supported:
 
 - `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh`
-  — **GPU**, **LoRA (r=32)** on a single node with **4 × H100/H200 80GB**.
+  — **GPU**, **LoRA (r=32)** on a single node with **4 × H800 80GB**.
 - `examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_npu.sh`
   — **NPU**, **full-parameter** on a single **Atlas 800T A3** node with **16 NPUs**.
 
@@ -41,9 +41,9 @@ python -c "import verl, verl_omni, vllm, vllm_omni; print('OK')"
 
 ## Prepare the model
 
-The script uses the HuggingFace Hub ID `Qwen/Qwen3-Omni-30B-A3B-Instruct`
-(~60 GB), cached automatically on first run. To use a local copy, set
-`MODEL_PATH`:
+The GPU V1 scripts default `MODEL_PATH` to `$HOME/models/Qwen/Qwen3-Omni-30B-A3B-Instruct`
+(~60 GB). The NPU script defaults to the HuggingFace Hub ID `Qwen/Qwen3-Omni-30B-A3B-Instruct`.
+To use a different local copy or Hub ID, set `MODEL_PATH`:
 
 ```bash
 export MODEL_PATH=/path/to/local/Qwen3-Omni-30B-A3B-Instruct
@@ -67,7 +67,7 @@ ls ~/data/gsm8k/   # train.parquet  test.parquet
 Launch from the repository root — pick the flavor that matches your hardware:
 
 ```bash
-# GPU, LoRA (r=32), 4 × H100/H200 — V1 trainer (recommended)
+# GPU, LoRA (r=32), 4 × H800 — V1 trainer (recommended)
 bash examples/gspo_trainer/qwen3_omni/run_qwen3_omni_thinker_gspo_lora_v1.sh
 
 # NPU, full-parameter, 16 × Atlas 800T A3
@@ -115,7 +115,7 @@ Only the **Thinker** (`Qwen3OmniMoeThinkerForConditionalGeneration`):
 
 Reward comes from the `naive` reward manager (math accuracy on parsed answers).
 
-Healthy signals (gsm8k, 4×H100, LoRA r=32):
+Healthy signals (gsm8k, 4×H800, LoRA r=32):
 
 - `training/rollout_actor_probs_pearson_corr` > 0.995 (actor ↔ rollout agree
   after weight sync) — the primary correctness signal.
@@ -124,22 +124,6 @@ Healthy signals (gsm8k, 4×H100, LoRA r=32):
 - `actor/loss` ≈ 1e-5, `actor/grad_norm` ∈ [1e-3, 1e-2], no OOM
   (`actor/perf/max_memory_allocated_gb` < 45).
 - `val-core/openai/gsm8k/acc/mean@1` rising with steps.
-
-### Performance (GPU + LoRA, V1)
-
-> Measured on a single node of **4 × H100/H200 80GB**, actor and rollout
-> colocated, gsm8k, `naive` reward, LoRA r=32, GSPO
-> ([wandb run](https://wandb.ai/mikecheung/gspo/runs/j5mro1tn)).
-
-| Script | Model | Algorithm | # Cards (colocate) | Batch × `rollout.n` | lr | Steps | val acc/mean@1 | rollout↔actor pearson | GPU memory |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `run_qwen3_omni_thinker_gspo_lora_v1.sh` | Qwen3-Omni-30B-A3B Thinker | GSPO + LoRA (r=32) | 4 | 128 × 16 = 2048 | 3e-6 | 578 | 0.97 | 0.997 | ~43 GB |
-
-Over 578 steps, `critic/rewards/mean` rose from ~0.93 to ~0.99 and
-`val-core/openai/gsm8k/acc/mean@1` reached **0.97**. `rollout_corr/log_ppl_diff`
-stayed near zero (~0.001), confirming the rollout↔actor consistency.
-`actor/perf/max_memory_allocated_gb` peaked at ~43 GB with param/optimizer
-offload enabled.
 
 ## Training with `MMK12`
 
@@ -201,6 +185,26 @@ The scorer combines `math_verify` accuracy with a progressive format reward on
 the `<answer>…\boxed{}…</answer>` template; see
 [`verl_omni/utils/reward_score/mmk12_reward.py`](https://github.com/verl-project/verl-omni/blob/main/verl_omni/utils/reward_score/mmk12_reward.py)
 for the full formula.
+
+## Performance
+
+All GPU results measured on a single node of **4 × H800 80GB**, actor and
+rollout colocated, LoRA r=32, GSPO.
+
+| Script | Dataset | # Cards | Batch × `rollout.n` | lr | Steps | val acc@1 / reward@1 | rollout↔actor pearson | GPU memory |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`gsm8k (wandb)`](https://wandb.ai/mikecheung/gspo/runs/j5mro1tn) | gsm8k | 4 | 128 × 16 = 2048 | 3e-6 | 578 | acc 0.969 | 0.997 | ~43 GB |
+| [`MMK12 (wandb)`](https://wandb.ai/mikecheung/gspo/runs/2j8hxr36) | MMK12 | 4 | 128 × 16 = 2048 | 3e-6 | 456 | reward 0.833 | 0.998 | ~59 GB |
+
+**gsm8k** ([wandb](https://wandb.ai/mikecheung/gspo/runs/j5mro1tn), `naive`
+reward, math accuracy): `critic/rewards/mean` rose from ~0.93 to ~0.97,
+`val-core/openai/gsm8k/acc/mean@1` reached **0.969**.
+`rollout_corr/log_ppl_diff` stayed near zero (~0.002).
+
+**MMK12** ([wandb](https://wandb.ai/mikecheung/gspo/runs/2j8hxr36), composite
+reward, `math_verify` + format): `critic/rewards/mean` reached 0.842,
+`val-core/mmk12/reward/mean@1` reached **0.833** (still training at
+step 456). `rollout_corr/log_ppl_diff` stayed near zero (~0.002).
 
 ## Logging
 
