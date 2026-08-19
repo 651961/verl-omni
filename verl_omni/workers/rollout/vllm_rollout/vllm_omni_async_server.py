@@ -70,6 +70,24 @@ def _drop_none_mapping_values(value: Any) -> Any:
     return value
 
 
+def _diffusion_output_type(sampling_params: dict) -> str:
+    output_type = sampling_params.get("output_type")
+    if output_type is None:
+        output_type = (sampling_params.get("extra_args") or {}).get("output_type")
+    return output_type or "image"
+
+
+def _pixel_output_to_uint8(output: torch.Tensor) -> torch.Tensor:
+    """Quantize a rollout pixel tensor from float ``[0, 1]`` to uint8 once."""
+    if output.dtype == torch.uint8:
+        return output
+    output = output.detach().to(dtype=torch.float32, copy=True)
+    if not bool(torch.isfinite(output).all()):
+        raise ValueError("Pixel rollout output must contain only finite values")
+    output = output.clamp_(0, 1)
+    return output.mul_(255).round_().to(dtype=torch.uint8)
+
+
 def _rollout_metadata_groups(multimodal_output: Any) -> tuple[Mapping[str, Any], ...]:
     if not isinstance(multimodal_output, Mapping):
         return ()
@@ -658,6 +676,7 @@ class vLLMOmniHttpServer(vLLMHttpServer):
         # synthesizes an abort OutputMessage to unblock the generate() coroutine).
         # Return a DiffusionOutput with stop_reason="aborted" so the retry client
         # can retry the whole sample.
+        output_type = _diffusion_output_type(sampling_params)
         if final_res is None or not final_res.images:
             finish_reason = "abort"
             if final_res is not None:
@@ -671,7 +690,10 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 "diffusion rollout produced no image (finish_reason=%s); returning %s", finish_reason, stop_reason
             )
             return DiffusionOutput(
-                diffusion_output=torch.empty(0),
+                diffusion_output=torch.empty(
+                    0,
+                    dtype=torch.float32 if output_type == "latent" else torch.uint8,
+                ),
                 log_probs=None,
                 stop_reason=stop_reason,
                 num_preempted=None,
@@ -685,12 +707,14 @@ class vLLMOmniHttpServer(vLLMHttpServer):
                 if key in diffusion_output and diffusion_output[key] is not None:
                     diffusion_output = diffusion_output[key]
                     break
-        if isinstance(diffusion_output, torch.Tensor):
-            diffusion_output = diffusion_output.float()
-        elif isinstance(diffusion_output, np.ndarray):
-            diffusion_output = torch.from_numpy(diffusion_output).float()
+        if output_type == "latent":
+            diffusion_output = torch.as_tensor(diffusion_output).float()
         else:
-            diffusion_output = self._to_tensor(diffusion_output).float() / 255.0
+            if isinstance(diffusion_output, np.ndarray):
+                diffusion_output = torch.from_numpy(diffusion_output)
+            elif not isinstance(diffusion_output, torch.Tensor):
+                diffusion_output = self._to_tensor(diffusion_output)
+            diffusion_output = _pixel_output_to_uint8(diffusion_output)
 
         # Native vllm-omni 0.26 contract: trajectory_* + multimodal metadata.
         def _maybe_unbatch(value: Any) -> Any:
