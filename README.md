@@ -128,9 +128,13 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td>MiniMax-H3</td>
-    <td>Diffusion generator</td>
-    <td>Any → Video + Audio</td>
+    <td rowspan="2">MiniMax-H3</td>
+    <td rowspan="2">Diffusion generator</td>
+    <td rowspan="2">Any → Video + Audio</td>
+    <td>DiffusionNFT</td>
+    <td>✅</td>
+  </tr>
+  <tr>
     <td>FlowGRPO</td>
     <td>WIP</td>
   </tr>
