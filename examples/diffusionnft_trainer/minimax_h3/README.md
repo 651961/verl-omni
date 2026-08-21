@@ -1,15 +1,60 @@
-# MiniMax H3 FL2VA First-Frame Data
+# MiniMax-H3 text-to-audio-video DiffusionNFT training
 
-Last updated: 08/21/2026
+Last updated: 08/22/2026
 
-Offline data pipeline for MiniMax H3 FL2VA (text+image to audio-video) RL
-training: turn a prompt list into FLUX reference images, pair them into
-train/test JSONL, and feed the FL2VA `prepare_data.py` converter.
+This recipe trains a rank-64 MiniMax H3 LoRA with online DiffusionNFT for
+text-to-audio-video (T2VA). A Diffusers transformer is trained with FSDP2 while
+vLLM-Omni generates joint video and audio rollouts. CLAP and ImageBind provide
+the default multi-reward (audio-video alignment).
 
-A ready-made dataset built with this pipeline is published at
-https://huggingface.co/datasets/zyfenghit/dancegrpo-t2av
+A ready-made FL2VA first-frame dataset built with the data pipeline below is
+published at https://huggingface.co/datasets/zyfenghit/dancegrpo-t2av
 
-## Pipeline
+## Install
+
+Follow the project [installation guide](../../../docs/start/install.md),
+then install the repository-pinned vLLM-Omni revision:
+
+```bash
+uv pip install -e ".[gpu]" --torch-backend=auto
+uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
+uv pip install -e ".[train,dev]"
+uv pip install "diffusers @ git+https://github.com/huggingface/diffusers.git@245d78fb48f1c87dfb560a94be6e191c9f9f1c0"
+```
+
+The explicit Diffusers revision is the tested API target that provides
+`MiniMaxH3Transformer3DModel`.
+
+## Checkpoint
+
+`MODEL_PATH` must be a local MiniMax-H3 repo root containing `FL2VA/`
+(vLLM-Omni rollout checkpoint) and `transformer/` (converted Diffusers
+`MiniMaxH3Transformer3DModel` for FSDP training). Do not replace the official
+rollout transformer with a symlink to the Diffusers conversion.
+
+## Data Preparation
+
+### T2VA (prompt-only)
+
+Convert prompt splits to prompt-only parquet (no condition images, and no
+negative prompts, since H3 is CFG-distilled):
+
+```bash
+python3 examples/diffusionnft_trainer/minimax_h3/prepare_t2av_data.py \
+    --input_dir /path/to/raw_prompts \
+    --output_dir /path/to/h3_t2va_data
+```
+
+Input is `train.txt`/`test.txt` (one prompt per line) or
+`train.jsonl`/`test.jsonl` (`prompt`/`text`/`caption` fields).
+
+### FL2VA first-frame data
+
+Offline pipeline for MiniMax H3 FL2VA (text+image to audio-video) RL training:
+turn a prompt list into FLUX reference images, pair them into train/test JSONL,
+and feed the FL2VA `prepare_data.py` converter.
+
+#### Pipeline
 
 ```
 prompts.txt ──► gen_flux_images.py ──► images/{index:06d}.jpg
@@ -27,7 +72,7 @@ prompts.txt ──► gen_flux_images.py ──► images/{index:06d}.jpg
                                 train.parquet / test.parquet
 ```
 
-## Getting the prompt file
+#### Getting the prompt file
 
 `dancegrpo_consist-id.txt` is the filtered ConsisID prompt list released by
 DanceGRPO (27,815 prompts, one per line). Download it directly from the
@@ -45,9 +90,9 @@ exact filtering criteria, so downloading the released file is the reproducible
 way to get the identical prompt set (verified line-for-line against the copy
 used for the published dataset).
 
-## Scripts
+#### Scripts
 
-### `gen_flux_images.py`
+##### `gen_flux_images.py`
 
 Multi-GPU FLUX batch image generator. Reads one prompt per line, shards the
 prompts across ranks (`torchrun`), and writes one JPEG per prompt plus a
@@ -66,7 +111,7 @@ torchrun --nproc_per_node=8 examples/diffusionnft_trainer/minimax_h3/gen_flux_im
     --height 400 --width 640
 ```
 
-### `build_fl2va_jsonl.py`
+##### `build_fl2va_jsonl.py`
 
 Pairs each prompt with its same-index image, verifies all images exist,
 shuffles with a fixed seed, and writes `train.jsonl` / `test.jsonl` with
@@ -80,7 +125,7 @@ python3 examples/diffusionnft_trainer/minimax_h3/build_fl2va_jsonl.py \
     --test_size 128 --seed 42
 ```
 
-## Reference dataset recipe
+#### Reference dataset recipe
 
 - Prompts: 27,815 English video captions from
   [ConsisID-preview-Data](https://huggingface.co/datasets/BestWishYsh/ConsisID-preview-Data),
@@ -93,50 +138,7 @@ python3 examples/diffusionnft_trainer/minimax_h3/build_fl2va_jsonl.py \
   pipeline LANCZOS-resizes condition images to the sampling resolution, so
   training at e.g. 288x464 (same ~1:1.61 aspect) works directly.
 
-## T2VA (text-to-audio-video) training
-
-Prompt-only sibling of the FL2VA recipe: trains a rank-64 MiniMax H3 LoRA
-with online DiffusionNFT. A Diffusers transformer is trained with FSDP2
-while vLLM-Omni generates joint video and audio rollouts. CLAP and ImageBind
-provide the default multi-reward (audio-video alignment).
-
-### Install
-
-Follow the project [installation guide](../../../docs/start/install.md),
-then install the repository-pinned vLLM-Omni revision:
-
-```bash
-uv pip install -e ".[gpu]" --torch-backend=auto
-uv pip install "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@$(cat .github/vllm_omni_pin.txt)"
-uv pip install -e ".[train,dev]"
-uv pip install "diffusers @ git+https://github.com/huggingface/diffusers.git@245d78fb48f1c87dfb560a94be6e191c9f9f1c0"
-```
-
-The explicit Diffusers revision is the tested API target that provides
-`MiniMaxH3Transformer3DModel`.
-
-### Checkpoint
-
-`MODEL_PATH` must be a local MiniMax-H3 repo root containing `FL2VA/`
-(vLLM-Omni rollout checkpoint) and `transformer/` (converted Diffusers
-`MiniMaxH3Transformer3DModel` for FSDP training). Do not replace the official
-rollout transformer with a symlink to the Diffusers conversion.
-
-### Prepare data
-
-Convert prompt splits to prompt-only parquet (no condition images, and no
-negative prompts, since H3 is CFG-distilled):
-
-```bash
-python3 examples/diffusionnft_trainer/minimax_h3/prepare_t2av_data.py \
-    --input_dir /path/to/raw_prompts \
-    --output_dir /path/to/h3_t2va_data
-```
-
-Input is `train.txt`/`test.txt` (one prompt per line) or
-`train.jsonl`/`test.jsonl` (`prompt`/`text`/`caption` fields).
-
-### Launch
+## Launch
 
 ```bash
 export MODEL_PATH=/path/to/MiniMax-H3
@@ -163,21 +165,25 @@ TOTAL_TRAINING_STEPS=100 OUTPUT_DIR=/path/to/output \
 bash examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh
 ```
 
-### Performance reference
+## Performance reference
 
 The run below trains the rank-64 LoRA with the default CLAP + ImageBind
 multi-reward; the weighted-sum reward rises steadily as audio-video alignment
 improves.
 
 ### Train Reward
-<img width="1851" height="613" alt="image" src="https://github.com/user-attachments/assets/5caf849a-f76c-4edd-a7cb-1820fbae08c1" />
-<img width="1852" height="623" alt="image" src="https://github.com/user-attachments/assets/61cef5be-a552-4e97-91bc-b4f1a27ad4e2" />
+
+![Train reward](https://github.com/user-attachments/assets/5caf849a-f76c-4edd-a7cb-1820fbae08c1)
+
+![Train reward (detail)](https://github.com/user-attachments/assets/61cef5be-a552-4e97-91bc-b4f1a27ad4e2)
 
 ### Eval Reward
-<img width="1856" height="648" alt="image" src="https://github.com/user-attachments/assets/73bd6b28-60af-4fec-a661-e6e9ce9a90d7" />
-### Time consumption
-<img width="1263" height="317" alt="image" src="https://github.com/user-attachments/assets/68e82be9-175d-49d5-88a0-efe434a92698" />
 
+![Eval reward](https://github.com/user-attachments/assets/73bd6b28-60af-4fec-a661-e6e9ce9a90d7)
+
+### Time consumption
+
+![Time consumption](https://github.com/user-attachments/assets/68e82be9-175d-49d5-88a0-efe434a92698)
 
 ## License
 
