@@ -73,6 +73,12 @@ class DiffusionPipelineConfig(BaseConfig):
     # Audio-video generation frame rate.
     frame_rate: float = 24.0
 
+    # Task label forwarded to the pipeline request contract, read by vLLM-Omni as
+    # the request `task`; values are pipeline-specific (e.g. t2va / fl2va / ref2va).
+    task: Optional[str] = None
+    # Frame indices (e.g. keyframe positions) for pipelines that condition on them.
+    frame_indices: Optional[list[int]] = None
+
     # Named canvas aspect ratio for pipelines that accept one (e.g. 16:9);
     # the set of supported ratios is pipeline-specific.
     aspect_ratio: Optional[str] = None
@@ -144,6 +150,8 @@ class DiffusionRolloutConfig(BaseConfig):
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
     tensor_model_parallel_size: int = 2
+    # Text-encoder TP shard size: 1 or tensor_model_parallel_size (validated below).
+    text_encoder_tp_size: int = 1
     pipeline_model_parallel_size: int = 1
     max_num_batched_tokens: int = 8192
     logprobs_mode: Optional[str] = "processed_logprobs"
@@ -233,3 +241,14 @@ class DiffusionRolloutConfig(BaseConfig):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
+
+        if self.text_encoder_tp_size < 1:
+            raise ValueError(f"text_encoder_tp_size must be >= 1, got {self.text_encoder_tp_size}.")
+        if self.text_encoder_tp_size not in (1, self.tensor_model_parallel_size):
+            # vLLM-Omni only builds a valid text-encoder group for tp_size == 1 or
+            # tp_size == tensor_model_parallel_size; intermediate sizes leave the
+            # out-of-group ranks without a device group and crash during init.
+            raise ValueError(
+                "text_encoder_tp_size must be either 1 or equal to tensor_model_parallel_size "
+                f"({self.tensor_model_parallel_size}), got {self.text_encoder_tp_size}."
+            )

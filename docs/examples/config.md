@@ -188,6 +188,7 @@ actor_rollout_ref:
       max_sequence_length: 512
       guidance_scale: null
       num_frames: 1
+      task: null
 ```
 
 - `actor_rollout_ref.rollout.pipeline.height` / `width`: Image / video spatial size for training rollout.
@@ -196,6 +197,7 @@ actor_rollout_ref:
 - `actor_rollout_ref.rollout.pipeline.max_sequence_length`: Max text-encoder token length for prompt encoding.
 - `actor_rollout_ref.rollout.pipeline.guidance_scale`: Distilled guidance scale for models with guidance embeddings; `null` disables.
 - `actor_rollout_ref.rollout.pipeline.num_frames`: Wan2.2 (and similar) video frame count (`81` ≈ 3s at 24 fps; image models keep `1`).
+- `actor_rollout_ref.rollout.pipeline.task`: Optional task label forwarded to the pipeline's request contract (vLLM-Omni reads it as the request `task`); values are pipeline-specific (e.g. MiniMax-H3: `t2va` / `fl2va` / `ref2va`), `null` lets the engine infer it.
 - `actor_rollout_ref.rollout.pipeline.output_type`: Pipeline output modality (dataclass default `image`).
 
 #### Rollout algo — `DiffusionRolloutAlgoConfig`
