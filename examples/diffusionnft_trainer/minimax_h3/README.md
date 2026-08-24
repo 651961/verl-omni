@@ -10,6 +10,49 @@ the default multi-reward (audio-video alignment).
 A ready-made FL2VA first-frame dataset built with the data pipeline below is
 published at https://huggingface.co/datasets/zyfenghit/dancegrpo-t2av
 
+## Video Examples
+
+
+
+<table>
+  <tr>
+    <th align="center">ID</th>
+    <th>Prompt</th>
+    <th align="center">MiniMax H3 base model</th>
+    <th align="center">MiniMax H3 + DiffusionNFT</th>
+  </tr>
+  <tr>
+    <td align="center">1</td>
+    <td>stickman monigote shooting a energy sphere from his hands</td>
+    <td align="center"><video src="https://github.com/user-attachments/assets/fc460b8f-3e49-4a23-9a60-a04f45df2190" width="280" controls></video></td>
+ <td align="center"><video src="https://github.com/user-attachments/assets/5fb70550-6c1e-428d-bd0c-dad21154745e" width="280" controls></video></td>
+  </tr>
+  <tr>
+    <td align="center">2</td>
+    <td>a husky dog with sunglasses riding on santas sled</td>
+    <td align="center"><video src="https://github.com/user-attachments/assets/e424acf9-6d40-4485-bb8b-c0daed244fc6" width="280" controls></video></td>
+    <td align="center"><video src="https://github.com/user-attachments/assets/d311b43c-0b49-4679-8e30-26711e91fd86" width="280" controls></video></td>
+  </tr>
+  <tr>
+    <td align="center">3</td>
+    <td>minimalist polygonal human skull in green flames with strong movement, uhd</td>
+    <td align="center"><video src="https://github.com/user-attachments/assets/95b260fe-cda3-4f4b-8e9a-5a670a5cf5e2" width="280" controls></video></td>
+    <td align="center"><video src="https://github.com/user-attachments/assets/15c823c7-4a8c-460e-8af9-9e9f720d07e8" width="280" controls></video></td>
+  </tr>
+  <tr>
+    <td align="center">4</td>
+    <td>17th century sailing ship making a path through the waves during a storm</td>
+    <td align="center"><video src="https://github.com/user-attachments/assets/7730a885-e6a6-4753-9722-ebaf13bb0c45" width="280" controls></video></td>
+    <td align="center"><video src="https://github.com/user-attachments/assets/a2d40943-71d1-4cef-abd7-ae7a31c456ad" width="280" controls></video></td>
+  </tr>
+  <tr>
+    <td align="center">5</td>
+    <td>close up of a skin texture, two hands with black gloves tatoo a red butterfly over it</td>
+    <td align="center"><video src="https://github.com/user-attachments/assets/b31a480b-5677-4d60-a65d-af2175f7a7cd" width="280" controls></video></td>
+    <td align="center"><video src="https://github.com/user-attachments/assets/b7e9fff2-e711-42ec-a21e-7e9f53113ac2" width="280" controls></video></td>
+  </tr>
+</table>
+
 ## Install
 
 Follow the project [installation guide](../../../docs/start/install.md),
