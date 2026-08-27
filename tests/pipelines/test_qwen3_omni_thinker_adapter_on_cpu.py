@@ -21,10 +21,6 @@ Patches dropped from the adapter:
 """
 
 import importlib.metadata
-import importlib.util
-import sys
-import types
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -32,11 +28,12 @@ import torch
 import torch.nn as nn
 from packaging.version import parse as parse_version
 
+from verl_omni.pipelines.qwen3_omni.thinker_training_adapter import Qwen3OmniThinkerAdapter
+
 
 def _require_version(pkg_name: str, min_version: str):
-    """Raise ``AssertionError`` if *pkg_name* is below *min_version*."""
     ver = importlib.metadata.version(pkg_name)
-    assert parse_version(ver) >= parse_version(min_version), f"{pkg_name} >= {min_version} is required, got {ver}"
+    assert parse_version(ver) >= parse_version(min_version), f"{pkg_name} >= {min_version} required, got {ver}"
 
 
 def _has_lora(module: nn.Module) -> bool:
@@ -50,28 +47,6 @@ def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
     _require_version("transformers", "5.0.0")
 
     from transformers import AutoConfig, AutoProcessor
-
-    class _FakeOmniModelBase:
-        @classmethod
-        def register(cls, *args, **kwargs):
-            return lambda subclass: subclass
-
-    model_base = types.ModuleType("verl_omni.pipelines.model_base")
-    model_base.OmniModelBase = _FakeOmniModelBase
-    for package_name in ("verl_omni", "verl_omni.pipelines", "verl_omni.pipelines.qwen3_omni"):
-        package = types.ModuleType(package_name)
-        package.__path__ = []
-        monkeypatch.setitem(sys.modules, package_name, package)
-    monkeypatch.setitem(sys.modules, "verl_omni.pipelines.model_base", model_base)
-
-    module_name = "verl_omni.pipelines.qwen3_omni.thinker_training_adapter"
-    adapter_path = Path(__file__).parents[2] / "verl_omni" / "pipelines" / "qwen3_omni" / "thinker_training_adapter.py"
-    spec = importlib.util.spec_from_file_location(module_name, adapter_path)
-    assert spec is not None and spec.loader is not None
-    adapter_module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, module_name, adapter_module)
-    spec.loader.exec_module(adapter_module)
-    Qwen3OmniThinkerAdapter = adapter_module.Qwen3OmniThinkerAdapter
 
     token_ids = {
         "<|image_pad|>": 101,
@@ -117,33 +92,12 @@ def test_configure_processor_binds_multimodal_pad_dedup(monkeypatch):
 
 
 def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
-    """The V1 adapter must bind get_rope_index_kwargs to contribute audio lengths to RoPE."""
+    """The V1 adapter must install the audio-aware agent-loop RoPE path."""
     pytest.importorskip("transformers")
     _require_version("transformers", "5.0.0")
 
     from transformers import AutoConfig, AutoProcessor
     from transformers.models.qwen3_omni_moe import Qwen3OmniMoeThinkerForConditionalGeneration
-
-    class _FakeOmniModelBase:
-        @classmethod
-        def register(cls, *args, **kwargs):
-            return lambda subclass: subclass
-
-    model_base = types.ModuleType("verl_omni.pipelines.model_base")
-    model_base.OmniModelBase = _FakeOmniModelBase
-    for package_name in ("verl_omni", "verl_omni.pipelines", "verl_omni.pipelines.qwen3_omni"):
-        package = types.ModuleType(package_name)
-        package.__path__ = []
-        monkeypatch.setitem(sys.modules, package_name, package)
-    monkeypatch.setitem(sys.modules, "verl_omni.pipelines.model_base", model_base)
-
-    module_name = "verl_omni.pipelines.qwen3_omni.thinker_training_adapter"
-    adapter_path = Path(__file__).parents[2] / "verl_omni" / "pipelines" / "qwen3_omni" / "thinker_training_adapter.py"
-    spec = importlib.util.spec_from_file_location(module_name, adapter_path)
-    assert spec is not None and spec.loader is not None
-    adapter_module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, module_name, adapter_module)
-    spec.loader.exec_module(adapter_module)
 
     class Qwen3OmniMoeProcessor:
         def __init__(self):
@@ -190,7 +144,7 @@ def test_v1_adapter_forwards_qwen3_omni_audio_lengths_to_rope(monkeypatch):
     monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
     monkeypatch.setattr(Qwen3OmniMoeThinkerForConditionalGeneration, "get_rope_index", _get_rope_index)
 
-    configured = adapter_module.Qwen3OmniThinkerAdapter.configure_processor(
+    configured = Qwen3OmniThinkerAdapter.configure_processor(
         "/fake/qwen3-omni",
         SimpleNamespace(trust_remote_code=False),
     )
