@@ -109,10 +109,10 @@ class TestH3RolloutOutputContract:
         assert len(frames) == _VIDEO_T
 
     def test_5d_wandb_video(self):
-        """wrap_val_samples_for_wandb handles [B,T,C,H,W] batched video."""
+        """wrap_val_samples_for_wandb handles H3's [B,C,T,H,W] video."""
         from verl_omni.utils.tracking import wrap_val_samples_for_wandb
 
-        video = torch.randint(0, 256, (1, _VIDEO_T, _VIDEO_C, 64, 64), dtype=torch.uint8)
+        video = torch.randint(0, 256, (1, _VIDEO_C, _VIDEO_T, 64, 64), dtype=torch.uint8)
         samples = [("a test prompt", video, 0.5, None, None)]
         wrapped, tmpdir, media = wrap_val_samples_for_wandb(samples, fps=24, output_dir=None)
         assert len(wrapped) == 1
