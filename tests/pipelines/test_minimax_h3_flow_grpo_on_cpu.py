@@ -37,6 +37,7 @@ from verl_omni.pipelines.minimax_h3_flow_grpo.vllm_omni_rollout_adapter import M
 from verl_omni.pipelines.minimax_h3_flow_grpo.weight_sync import MiniMaxH3WeightSyncMixin
 from verl_omni.pipelines.model_base import DiffusionModelBase, VllmOmniPipelineBase
 from verl_omni.workers.rollout.vllm_rollout.vllm_omni_async_server import vLLMOmniHttpServer
+from verl_omni.workers.rollout.vllm_rollout.vllm_omni_diffusion_strategy import DiffusionStrategy
 
 
 def _trajectory() -> dict[str, torch.Tensor]:
@@ -183,9 +184,8 @@ def test_rollout_output_reaches_actor_and_replays_joint_transition(monkeypatch) 
         request_output=None,
     )
     server = object.__new__(vLLMOmniHttpServer)
-    server._ar_mode = False
     server.global_steps = 1
-    processed = server._process_output(final_res, None, {"output_type": "pt", "logprobs": True})
+    processed = DiffusionStrategy(server).process_output(final_res, None, {"output_type": "pt", "logprobs": True})
 
     for key in ("all_latents", "all_next_latents", "h3_step_indices", "h3_audio_timesteps"):
         assert key in processed.extra_fields
