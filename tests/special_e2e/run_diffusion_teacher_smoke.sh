@@ -119,8 +119,6 @@ case "${SMOKE}" in
             "${two_teachers[@]}"
             distillation.n_gpus_per_node=2
             distillation.nnodes=1
-            # The default fixed port range hands every worker group the same rendezvous port.
-            trainer.ray_master_port_range=null
         )
         objective=("${pure_distill[@]}")
         ;;
