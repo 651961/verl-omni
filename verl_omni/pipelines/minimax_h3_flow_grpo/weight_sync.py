@@ -104,7 +104,7 @@ class MiniMaxH3WeightSyncMixin:
                 # Keep Q/K/V separate. The fused parameter's native loader packs
                 # the requested shard and applies the correct TP partition.
                 param.weight_loader(param, tensor, projection[0])
-                loaded.add(name)
+                loaded.add(f"{component}.{target_name}")
                 continue
 
             if inner.endswith(".ff.net.0.proj.weight"):
@@ -119,7 +119,7 @@ class MiniMaxH3WeightSyncMixin:
                 up, gate = tensor.chunk(2, dim=0)
                 param.weight_loader(param, gate, 0)
                 param.weight_loader(param, up, 1)
-                loaded.add(name)
+                loaded.add(f"{component}.{target_name}")
                 continue
 
             translated.append((f"{component}.{_diffusers_to_vllm_name(inner)}", tensor))

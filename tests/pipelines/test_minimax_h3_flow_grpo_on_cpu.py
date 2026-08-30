@@ -272,11 +272,11 @@ class _SyncPipeline(MiniMaxH3WeightSyncMixin, _RecordingBase):
         )
 
 
-def test_full_weight_sync_uses_fused_loaders_and_renames_plain_weights() -> None:
+def test_full_weight_sync_uses_fused_loaders_and_returns_model_parameter_names() -> None:
     pipeline = _SyncPipeline()
     q = torch.randn(8, 8)
     geglu = torch.arange(32, dtype=torch.float32).reshape(8, 4)
-    pipeline.load_weights(
+    loaded = pipeline.load_weights(
         [
             ("transformer.transformer_blocks.0.attn.to_q.weight", q),
             ("transformer.transformer_blocks.0.ff.net.0.proj.weight", geglu),
@@ -289,6 +289,11 @@ def test_full_weight_sync_uses_fused_loaders_and_renames_plain_weights() -> None
     torch.testing.assert_close(pipeline.fc1.weight_loader.call_args_list[0].args[1], geglu[4:])
     torch.testing.assert_close(pipeline.fc1.weight_loader.call_args_list[1].args[1], geglu[:4])
     assert pipeline.forwarded[0][0] == "transformer.audio_patch_proj.weight"
+    assert loaded == {
+        "transformer.audio_patch_proj.weight",
+        "transformer.blocks.0.attn.qkv_proj.weight",
+        "transformer.blocks.0.mlp.fc1.weight",
+    }
 
 
 def test_lora_weight_sync_splits_geglu_and_rewrites_targets() -> None:
