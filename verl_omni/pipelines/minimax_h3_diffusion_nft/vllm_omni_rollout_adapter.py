@@ -27,6 +27,7 @@ from vllm_omni.diffusion.models.minimax_h3.time_request import minimax_h3_time_s
 
 from verl_omni.pipelines.diffusion_rollout_output import with_rollout_data
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
+from verl_omni.pipelines.rollout_media import DiffusionIOSpec, MediaSpec
 
 from .common import MiniMaxH3RolloutWeightSyncMixin, pack_video_audio_rows
 
@@ -38,6 +39,13 @@ _VIDEO_PATCH_SIZE = (1, 2, 2)
 @VllmOmniPipelineBase.register("MiniMaxH3Pipeline", algorithm="diffusion_nft")
 class MiniMaxH3DiffusionNFTPipeline(MiniMaxH3RolloutWeightSyncMixin, MiniMaxH3Pipeline):
     """Rollout pipeline for MiniMax H3 used by DiffusionNFT."""
+
+    #: Declares the joint video/audio rollout streams so the diffusion strategy
+    #: does not hard-code the audio tuple position or its 32 kHz sample rate.
+    diffusion_io_spec = DiffusionIOSpec(
+        primary=MediaSpec("video"),
+        auxiliary=(MediaSpec("audio", sample_rate=32000),),
+    )
 
     def __init__(self, *, od_config: Any, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
