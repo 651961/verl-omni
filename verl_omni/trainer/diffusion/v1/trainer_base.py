@@ -324,7 +324,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         if self.reward_loop_manager.reward_loop_worker_handles is None and self.use_rm:
             with marked_timer("reward", timing_raw, color="yellow"):
                 self.checkpoint_manager.sleep_replicas()
-                data = self._compute_reward_colocate(data)
+                data = data.union(self._compute_reward_colocate(data))
                 self.checkpoint_manager.update_weights(self.global_steps)
 
         data = self._balance_batch(data, metrics=metrics)
@@ -1073,7 +1073,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
             if self.use_rm and self.reward_loop_manager.reward_loop_worker_handles is None:
                 self.checkpoint_manager.sleep_replicas()
-                data = self._compute_reward_colocate(data)
+                data = data.union(self._compute_reward_colocate(data))
                 self.checkpoint_manager.update_weights(self.global_steps)
 
             input_ids = data.batch["prompts"]
