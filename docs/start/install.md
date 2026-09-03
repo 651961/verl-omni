@@ -97,6 +97,13 @@ actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_3_HUB
 
 If FA3 deps are missing at runtime, training falls back to native/SDPA automatically. NPU recipes override with `actor_rollout_ref.model.attn_backend=_native_npu`.
 
+On older GPUs, prefer FA2 over the FA3 default — both use the same `kernels` Hub path, so nothing extra to install:
+
+```bash
+actor_rollout_ref.model.attn_backend=flash_varlen_hub
+actor_rollout_ref.rollout.rollout_attn_backend=FLASH_ATTN_HUB
+```
+
 ### Flash Attention 2 (omni trainer)
 
 The omni trainer's actor is a transformers LLM; following verl's practice for LLM training, it defaults to `flash_attention_2`, which requires the local `flash-attn` package — see verl's [installation docs](https://verl.readthedocs.io/en/latest/start/install.html).

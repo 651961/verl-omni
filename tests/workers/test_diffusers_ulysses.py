@@ -29,6 +29,9 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 
+# Hub FA kernels don't fetch on the torch-2.13 CI stack (no flash-attn2 build; hf-mirror breaks flash-attn3).
+_ulysses_backends = ["native"]
+
 
 def get_device_name() -> str:
     if torch.cuda.is_available():
@@ -88,7 +91,7 @@ def _load_config_for_sp(sp_size: int) -> dict:
 
 
 @pytest.mark.parametrize("sp_size", [2, 4])
-@pytest.mark.parametrize("backend", ["native"])
+@pytest.mark.parametrize("backend", _ulysses_backends)
 def test_diffusers_ulysses_fwd(sp_size, backend):
     """
     Ulysses SP forward must produce numerically equivalent output to a plain
@@ -186,7 +189,7 @@ def _diffusers_ulysses_fwd(sp_size: int, dp_size: int, backend: str):
 
     assert output_sp.shape == output_no_sp.shape, f"Shape mismatch: SP {output_sp.shape} vs non-SP {output_no_sp.shape}"
 
-    # we need a strict tolerance here to prove the native CP path is correct
+    # we need a strict tolerance here to show _patch is working
     torch.testing.assert_close(output_sp.float(), output_no_sp.float(), rtol=1e-2, atol=1e-2)
 
     if rank == 0:
@@ -202,7 +205,7 @@ def _diffusers_ulysses_fwd(sp_size: int, dp_size: int, backend: str):
 
 
 @pytest.mark.parametrize("sp_size", [2, 4])
-@pytest.mark.parametrize("backend", ["native"])
+@pytest.mark.parametrize("backend", _ulysses_backends)
 def test_diffusers_ulysses_fwd_bwd(sp_size, backend):
     """
     Ulysses SP backward pass must produce equivalent gradients to a plain
@@ -336,7 +339,7 @@ def _diffusers_ulysses_fwd_bwd(sp_size: int, dp_size: int, backend: str):
 
 
 @pytest.mark.parametrize("sp_size", [2, 4])
-@pytest.mark.parametrize("backend", ["native"])
+@pytest.mark.parametrize("backend", _ulysses_backends)
 def test_diffusers_ulysses_fwd_bwd_fsdp(sp_size, backend):
     """
     FSDP-wrapped Ulysses SP backward must produce equivalent gradients to a
