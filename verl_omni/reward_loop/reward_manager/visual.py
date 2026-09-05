@@ -19,6 +19,7 @@ from verl import DataProto
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 from verl.utils.reward_score import default_compute_score as _upstream_default_compute_score
 
+from verl_omni.utils.batch_fields import get_batch_field
 from verl_omni.utils.reward_score import default_compute_score_image
 
 
@@ -59,7 +60,12 @@ class VisualRewardManager(RewardManagerBase):
     async def run_single(self, data: DataProto) -> dict:
         assert len(data) == 1, "Only support single data item"
         data_item = data[0]
-        response_visual = data_item.batch["responses"]
+        response_visual = get_batch_field(data_item, "responses")
+        # DataProto slicing can retain a singleton batch dimension for tensor
+        # responses. Reward scorers consume one video, so remove only that
+        # leading dimension and preserve the video layout.
+        if isinstance(response_visual, torch.Tensor) and response_visual.ndim == 5 and response_visual.shape[0] == 1:
+            response_visual = response_visual.squeeze(0)
         _validate_visual_response(response_visual, self.config, is_validate=data_item.meta_info.get("validate", False))
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]

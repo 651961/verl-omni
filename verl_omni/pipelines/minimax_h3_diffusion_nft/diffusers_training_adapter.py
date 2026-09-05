@@ -43,6 +43,16 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
     """Forward-process MiniMax H3 adapter used by DiffusionNFT."""
 
     @classmethod
+    def ragged_rollout_tensor_dims(cls) -> dict[str, int]:
+        """Transport flattened clean video/audio latents with a variable width."""
+        return {"latents_clean": 1}
+
+    @classmethod
+    def ragged_model_output_dims(cls) -> dict[str, int]:
+        """Preserve the latent axis in [batch, timesteps, joint_width] outputs."""
+        return {key: 2 for key in ("old_prediction", "forward_prediction", "ref_forward_prediction", "x0", "xt")}
+
+    @classmethod
     def validate_lora_config(cls, model_config: DiffusionModelConfig) -> None:
         """Reject LoRA targets the rollout weight sync cannot transport (shares common.py whitelist)."""
         if model_config.lora_rank > 0:
@@ -84,7 +94,10 @@ class MiniMaxH3DiffusionNFT(DiffusionModelBase):
     ) -> tuple[dict, Optional[dict]]:
         """Unpack joint latents and prepare H3 transformer inputs."""
         del step, negative_prompt_embeds, negative_prompt_embeds_mask
-        meta = micro_batch["latent_meta"][0].reshape(-1).tolist()
+        metadata = micro_batch["latent_meta"].reshape(latents.shape[0], -1)
+        if not torch.equal(metadata, metadata[:1].expand_as(metadata)):
+            raise ValueError("MiniMax H3 requires one target latent shape per forward; split mixed shapes first.")
+        meta = metadata[0].tolist()
         num_video_rows, num_audio_rows = int(meta[0]), int(meta[1])
         video_rows, audio_rows = unpack_video_audio_rows(latents, num_video_rows, num_audio_rows)
         condition_video_rows = micro_batch.get("condition_video_rows", None)

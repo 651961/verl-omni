@@ -982,7 +982,7 @@ class DiffusionNFTLoss(DiffusionLossFn):
         rollout_batch["uid"] = batch.non_tensor_batch["uid"]
 
         for key in ("latents_clean", "train_timesteps"):
-            if key not in rollout_batch:
+            if key not in rollout_batch and not (key == "latents_clean" and key in batch.non_tensor_batch):
                 raise ValueError(f"DiffusionNFT actor batch requires `{key}` from rollout.")
 
         advantages = DiffusionNFTLoss._compute_group_advantages(

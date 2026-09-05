@@ -105,6 +105,26 @@ class DiffusionModelBase(ABC):
         return
 
     @classmethod
+    def ragged_rollout_tensor_dims(cls) -> dict[str, int]:
+        """Declare variable worker-input axes, including the leading batch axis.
+
+        Rollout transports each declared tensor separately on the driver. The
+        worker projection moves these axes to axis one for jagged transport;
+        the engine restores them before each sample forward. Each field must
+        have only one variable axis; media stays on the driver.
+        """
+        return {}
+
+    @classmethod
+    def ragged_model_output_dims(cls) -> dict[str, int]:
+        """Declare model-layout axes in outputs after stacking timesteps.
+
+        Worker RPCs use canonical jagged axis one. Driver consumers restore
+        the declared axes before storing per-sample output tensors.
+        """
+        return {}
+
+    @classmethod
     def preserve_fp32_modules(cls) -> bool:
         """Whether to preserve diffusers ``_keep_in_fp32_modules`` during model loading.
 

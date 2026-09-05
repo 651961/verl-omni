@@ -26,6 +26,8 @@ from typing import Any
 
 import pandas as pd
 
+from verl_omni.utils.dataset.minimax_h3_video import video_spec_metadata
+
 _MAX_IMAGES = 9
 _MAX_VIDEOS = 3
 _MAX_AUDIOS = 3
@@ -104,6 +106,11 @@ def _convert_split(input_dir: Path, split: str, max_samples: int) -> pd.DataFram
             if len(image_values) + len(video_values) + len(audio_values) > _MAX_REFERENCES:
                 raise ValueError(f"Ref2VA row {index} exceeds the {_MAX_REFERENCES}-file reference limit.")
 
+            try:
+                video_spec = video_spec_metadata(example)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid video specification at {split} row {index}: {exc}") from exc
+
             image_paths = [_resolve_path(input_dir, value, field="image") for value in image_values]
             videos, video_sources = _video_specs(input_dir, video_values)
             audio_paths = [_resolve_path(input_dir, value, field="audio") for value in audio_values]
@@ -118,11 +125,13 @@ def _convert_split(input_dir: Path, split: str, max_samples: int) -> pd.DataFram
                     "audios": [str(path) for path in audio_paths],
                     "reward_model": {"style": "model", "ground_truth": prompt},
                     "extra_info": {
+                        **example.get("extra_info", {}),
                         "split": split,
                         "index": index,
                         "source_images": [str(path) for path in image_paths],
                         "source_videos": video_sources,
                         "source_audios": [str(path) for path in audio_paths],
+                        **video_spec,
                     },
                 }
             )

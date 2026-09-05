@@ -69,6 +69,28 @@ def _read_jsonl(dump_path, global_steps=0):
 
 
 class TestDumpGenerations:
+    def test_ragged_videos_keep_per_sample_shapes(self, tmp_path, monkeypatch):
+        outputs = [torch.zeros(2, 3, 16, 32, dtype=torch.uint8), torch.zeros(3, 3, 32, 16, dtype=torch.uint8)]
+        received = []
+
+        def export(video, path, *, fps, **kwargs):
+            received.append((tuple(video.shape), fps))
+            Path(path).write_bytes(b"video")
+
+        monkeypatch.setattr(ray_diffusion_trainer, "_export_video", export)
+        BaseRayDiffusionTrainer._dump_generations(
+            SimpleNamespace(global_steps=0),
+            inputs=["A", "B"],
+            outputs=outputs,
+            gts=["A", "B"],
+            scores=[0.5, 0.75],
+            reward_extra_infos_dict={},
+            dump_path=str(tmp_path),
+            fps=24,
+        )
+        assert received == [((2, 3, 16, 32), 24), ((3, 3, 32, 16), 24)]
+        assert len(_read_jsonl(tmp_path)) == 2
+
     def test_rejects_non_uint8_outputs(self, tmp_path):
         outputs = torch.zeros(1, 3, 16, 16)
 

@@ -22,7 +22,10 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import WorkerGroup
 from verl.utils import tensordict_utils as tu
 
-from verl_omni.trainer.diffusion.diffusion_trainer_utils import _to_diffusion_worker_tensordict
+from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
+    _diffusion_outputs_to_dataproto,
+    _to_diffusion_worker_tensordict,
+)
 from verl_omni.workers.config.diffusion import DiffusionDistillationConfig, DiffusionDistillationTeacherModelConfig
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
@@ -83,11 +86,10 @@ class DiffusionTeacherManager:
         )
         return self.teacher_wg[teacher_key].infer_teacher_batch(batch_td)
 
-    @staticmethod
-    def _to_dataproto(output) -> DataProto:
-        prev_sample_mean = tu.get(output, "prev_sample_mean")
-        teacher_output = tu.get_tensordict({"teacher_prev_sample_mean": prev_sample_mean.float()})
-        return DataProto.from_tensordict(teacher_output)
+    def _to_dataproto(self, output) -> DataProto:
+        return _diffusion_outputs_to_dataproto(
+            output, {"prev_sample_mean": "teacher_prev_sample_mean"}, self.model_config
+        )
 
     def compute_prev_sample_mean(self, batch: DataProto) -> DataProto:
         """Score ``batch`` with its teachers, returning ``teacher_prev_sample_mean`` in the input row order."""

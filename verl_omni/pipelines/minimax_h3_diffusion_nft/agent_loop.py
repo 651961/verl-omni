@@ -13,12 +13,15 @@
 # limitations under the License.
 """MiniMax H3 agent loop for token-id-native raw-text prompts."""
 
+from collections.abc import Mapping
 from typing import Any
 
 from verl.experimental.agent_loop.agent_loop import register
 from verl.utils.tokenizer import normalize_token_ids
 
 from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
+from verl_omni.pipelines.model_base import DiffusionModelBase
+from verl_omni.utils.dataset.minimax_h3_video import resolve_video_spec
 
 from .common import MINIMAX_H3_TOKEN_ID_NATIVE_KEY, messages_to_text
 
@@ -29,10 +32,50 @@ __all__ = ["MiniMaxH3DiffusionSingleTurnAgentLoop"]
 class MiniMaxH3DiffusionSingleTurnAgentLoop(DiffusionSingleTurnAgentLoop):
     """Tokenize H3 prompts verbatim and preserve raw reference media."""
 
+    @staticmethod
+    def _apply_row_shape(sampling_params: dict[str, Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Apply per-row output dimensions to an H3 reference-conditioned request."""
+        if sampling_params.get("task") not in {"fl2va", "ref2va"}:
+            return sampling_params
+
+        spec = resolve_video_spec(kwargs)
+        # Upstream duration aliases take precedence over num_frames. Disallow
+        # them so a global setting cannot silently override a row's frame count.
+        for source in (sampling_params, sampling_params.get("extra_args") or {}):
+            if not isinstance(source, Mapping):
+                raise ValueError("MiniMax H3 sampling extra_args must be a mapping.")
+            target = source.get("target") or {}
+            if not isinstance(target, Mapping):
+                raise ValueError("MiniMax H3 sampling target must be a mapping.")
+            if any(source.get(key) is not None for key in ("duration", "duration_seconds")) or (
+                target.get("duration_seconds") is not None
+            ):
+                raise ValueError("MiniMax H3 per-row num_frames cannot be combined with a pipeline duration override.")
+        # H3 reads fps rather than OmniDiffusionSamplingParams.frame_rate.
+        return {**sampling_params, **spec, "fps": int(spec["frame_rate"])}
+
     async def run(self, sampling_params: dict[str, Any], **kwargs):
         """Mark IDs so the H3 rollout can reject generic chat-template tokens."""
+        sampling_params = self._apply_row_shape(sampling_params, kwargs)
         sampling_params = {**sampling_params, MINIMAX_H3_TOKEN_ID_NATIVE_KEY: True}
-        return await super().run(sampling_params, **kwargs)
+        tensor_dims = {}
+        if sampling_params.get("task") in {"fl2va", "ref2va"}:
+            model_config = self.config.actor_rollout_ref.model
+            adapter = DiffusionModelBase.get_class_by_name(
+                "MiniMaxH3Pipeline", model_config.algorithm, getattr(model_config, "external_lib", None)
+            )
+            tensor_dims = adapter.ragged_rollout_tensor_dims()
+            if not tensor_dims:
+                raise NotImplementedError(
+                    f"MiniMax H3 {model_config.algorithm} does not declare variable-size tensors."
+                )
+        output = await super().run(sampling_params, **kwargs)
+        if tensor_dims:
+            # Declare variable-size tensors explicitly, even for homogeneous worker
+            # chunks: another worker may return a different resolution or duration.
+            output.extra_fields["ragged_tensor_keys"] = ("responses", "audio", *tensor_dims)
+            output.extra_fields["ragged_tensor_dims"] = tensor_dims
+        return output
 
     async def process_multi_modal_info(self, messages: list[dict]) -> dict[str, list[Any]]:
         """Keep H3 reference paths and waveforms in their upstream input format."""

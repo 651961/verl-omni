@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from verl_omni.utils.dataset.minimax_h3_video import video_spec_metadata
+
 _FRAME_MODES = {"first": ([0], 1), "last": ([-1], 1), "first_last": ([0, -1], 2)}
 
 
@@ -45,7 +47,11 @@ def _convert_split(input_dir: Path, split: str, frame_mode: str, max_samples: in
             prompt = str(example["prompt"]).strip()
             if not prompt:
                 raise ValueError(f"Empty prompt at {split} row {index}.")
-            image_paths = [input_dir / name for name in _image_names(example, expected_images)]
+            try:
+                video_spec = video_spec_metadata(example)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid video specification at {split} row {index}: {exc}") from exc
+            image_paths = [(input_dir / name).resolve() for name in _image_names(example, expected_images)]
             missing = [str(path) for path in image_paths if not path.is_file()]
             if missing:
                 raise FileNotFoundError(f"Condition image(s) not found: {missing}")
@@ -57,10 +63,12 @@ def _convert_split(input_dir: Path, split: str, frame_mode: str, max_samples: in
                     "images": [{"bytes": path.read_bytes()} for path in image_paths],
                     "reward_model": {"style": "model", "ground_truth": prompt},
                     "extra_info": {
+                        **example.get("extra_info", {}),
                         "split": split,
                         "index": index,
                         "frame_indices": frame_indices,
-                        "source_images": [str(path.relative_to(input_dir)) for path in image_paths],
+                        "source_images": [str(path) for path in image_paths],
+                        **video_spec,
                     },
                 }
             )
@@ -76,9 +84,10 @@ def main() -> None:
     parser.add_argument("--val_size", type=int, default=-1)
     args = parser.parse_args()
 
+    input_dir = args.input_dir.expanduser().resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    train = _convert_split(args.input_dir.expanduser(), "train", args.frame_mode, args.train_size)
-    validation = _convert_split(args.input_dir.expanduser(), "test", args.frame_mode, args.val_size)
+    train = _convert_split(input_dir, "train", args.frame_mode, args.train_size)
+    validation = _convert_split(input_dir, "test", args.frame_mode, args.val_size)
     train.to_parquet(args.output_dir / "train.parquet", row_group_size=500)
     validation.to_parquet(args.output_dir / "test.parquet", row_group_size=500)
     print(f"Wrote {len(train)} training and {len(validation)} validation rows to {args.output_dir}")

@@ -1,12 +1,16 @@
 # MiniMax H3 T2VA, FL2VA, and Ref2VA DiffusionNFT
 
-Last updated: 09/04/2026
+Last updated: 09/05/2026
 
-These recipes train rank-64 MiniMax H3 LoRA adapters with online DiffusionNFT
+These recipes train MiniMax H3 LoRA adapters with online DiffusionNFT
 for text-to-audio-video (T2VA), first-frame image-to-audio-video (FL2VA), and
 reference-to-audio-video (Ref2VA) generation. A Diffusers transformer is
 trained with FSDP2 while vLLM-Omni generates joint video and audio rollouts.
-CLAP and ImageBind provide the default multi-reward (audio-video alignment).
+T2VA uses CLAP and ImageBind for audio-video alignment. The FL2VA and Ref2VA
+launchers use Qwen3.8-27B to score the prompt, reference images and/or videos,
+and the complete generated video. This visual reward does not score audio.
+The default reward checkpoint is `/models/Qwen3.8-27B`, with tensor parallel
+size 4; override these with `REWARD_MODEL_PATH` and `REWARD_TP`.
 
 A ready-made FL2VA first-frame dataset built with the data pipeline below is
 published at https://huggingface.co/datasets/zyfenghit/dancegrpo-t2av
@@ -97,7 +101,7 @@ Input is `train.txt`/`test.txt` (one prompt per line) or
 
 Offline pipeline for MiniMax H3 FL2VA (text+image to audio-video) RL training:
 turn a prompt list into FLUX reference images, pair them into train/test JSONL,
-and feed the FL2VA `prepare_data.py` converter.
+and feed the FL2VA `prepare_fl2va_data.py` converter.
 
 #### Pipeline
 
@@ -111,7 +115,7 @@ prompts.txt ──► gen_flux_images.py ──► images/{index:06d}.jpg
               (same index)          train.jsonl / test.jsonl
                                              │
                                              ▼
-                              prepare_data.py --frame_mode first
+                              prepare_fl2va_data.py --frame_mode first
                                              │
                                              ▼
                                 train.parquet / test.parquet
@@ -160,7 +164,8 @@ torchrun --nproc_per_node=8 examples/diffusionnft_trainer/minimax_h3/gen_flux_im
 
 Pairs each prompt with its same-index image, verifies all images exist,
 shuffles with a fixed seed, and writes `train.jsonl` / `test.jsonl` with
-relative image paths — the input format of `prepare_data.py`:
+relative image paths. Add the required per-row video specifications described
+below before passing these JSONL files to `prepare_fl2va_data.py`:
 
 ```bash
 python3 examples/diffusionnft_trainer/minimax_h3/build_fl2va_jsonl.py \
@@ -178,10 +183,10 @@ python3 examples/diffusionnft_trainer/minimax_h3/build_fl2va_jsonl.py \
   (`assets/consist-id.txt`)
 - Images: FLUX.1-dev, 400x640, 30 steps, guidance 3.5, per-index seeds
 - Split: seed-42 shuffle -> 27,687 train / 128 test
-- Convert: `prepare_data.py --frame_mode first`, then train with
+- Convert: `prepare_fl2va_data.py --frame_mode first`, then train with
   `rollout.pipeline.task=fl2va` and `frame_indices='[0]'`. The rollout
   pipeline LANCZOS-resizes condition images to the sampling resolution, so
-  training at e.g. 288x464 (same ~1:1.61 aspect) works directly.
+  choose a 32-aligned target canvas that matches the first-frame aspect ratio.
 
 ## Launch
 
@@ -222,13 +227,13 @@ Prepare `train.jsonl` and `test.jsonl`. Each row has a prompt and either an
 `images` list or explicit first/last names:
 
 ```json
-{"prompt":"A sunrise becomes a starry night.","images":["images/first.png","images/last.png"]}
+{"prompt":"A sunrise becomes a starry night.","images":["images/first.png","images/last.png"],"extra_info":{"resolution":"1344x768","num_frames":124,"frame_rate":24.0}}
 ```
 
 Convert it with:
 
 ```bash
-python examples/diffusionnft_trainer/minimax_h3/prepare_data.py \
+python examples/diffusionnft_trainer/minimax_h3/prepare_fl2va_data.py \
   --input_dir /path/to/raw \
   --output_dir /path/to/parquet \
   --frame_mode first_last
@@ -253,19 +258,75 @@ that silently breaks the rollout weight loader.
 
 ### Run
 
+Activate the training environment first (`source .venv/bin/activate` when
+using the repository-local environment). Run data preparation on the training
+machine, or keep the same absolute reference paths there: the visual reward
+reads `extra_info.source_images` and `extra_info.source_videos`.
+
 ```bash
 MODEL_PATH=/path/to/MiniMax-H3 \
-DATA_DIR=/path/to/parquet \
+TRAIN_DATA_PATH=/path/to/parquet/train.parquet \
+VAL_DATA_PATH=/path/to/parquet/test.parquet \
+REWARD_MODEL_PATH=/models/Qwen3.8-27B \
 bash examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_fl2va_lora.sh
 ```
 
-The latest vLLM-Omni contract requires 4–15 seconds at 24 FPS. The launcher's
-`NUM_FRAMES=96` is aligned by vLLM-Omni to the next valid `17n+5` boundary.
-Sampling edges must be multiples of 32 (the H3 pipeline silently floors
-anything else); the recipe uses 288x448 for training and 576x928 for
-validation. Training rollouts sample with `INFER_STEPS=10` diffusion steps for
-throughput and validation uses 40; 2–4 steps are suitable only for contract
-smoke tests. Do not use the old short 22/29-frame settings.
+Each FL2VA and Ref2VA row must explicitly provide all three output fields in
+`extra_info`. There are no per-row fallback values:
+
+| Field | Meaning and validation |
+| --- | --- |
+| `resolution` | Width x height, e.g. `1344x768`, `768x1344`, `1024x1024`; positive multiples of 32, aspect ratio between 1:4 and 4:1. |
+| `num_frames` | Actual frame count, satisfying `17*n+5` and a duration of 4–15 seconds; e.g. 107, 124, 141, 209. |
+| `frame_rate` | Required explicitly; the current H3 engine supports 24 only. The launchers export videos with `trainer.video_fps=24`. |
+
+The converter and Agent Loop reject missing, conflicting or unaligned values.
+In particular, 96 frames is rejected instead of silently becoming 107.
+Pipeline `duration` / `duration_seconds` overrides are rejected because upstream
+would otherwise use them in preference to the row's `num_frames`.
+For FL2VA, choose a canvas matching the first frame and your SFT preprocessing.
+For Ref2VA, choose the desired output canvas independently of the reference
+image sizes. The same row's `rollout.n` samples all use the same specification.
+Validation also uses its rows' declared specifications.
+
+The standard Ray recipes support a logical batch with different resolutions
+and frame counts. The [H3 FlowGRPO recipes](../../flowgrpo_trainer/minimax_h3/README.md#per-row-output-specifications)
+use the same dataset specification and shared transport, with algorithm-specific
+trajectory declarations. Rollout workers transport variable video, audio and clean
+latent tensors individually. The trainer converts clean latents to jagged
+tensors, and the NFT engine computes one sample per forward, using that
+sample's own layout. Gradients accumulate across all samples and selected
+diffusion timesteps before one optimizer update per mini-batch. The loss
+averages within each sample first, so longer clips do not get extra weight
+simply because they contain more latent elements. The launchers set actor micro
+batch size to one, and the engine enforces it for this variable-shape path.
+
+With the launchers' `data.train_batch_size=32`, `rollout.n=16`,
+`actor.ppo_mini_batch_size=16`, and `actor.ppo_epochs=1`, each rollout round
+produces 512 samples followed by two optimizer updates of 256 samples each.
+The standard dataset sampler supports `data.shuffle`, `data.seed`, and dataloader
+resume. It does not create resolution buckets; the dataloader still drops a final
+incomplete **global** training batch.
+
+Training uses `INFER_STEPS=10`; validation uses 33. On the training machine,
+first run two steps with a small parquet containing both orientations and at
+least two valid frame counts. After setting the checkpoint/data environment
+variables above, an 8-GPU smoke run can use:
+
+```bash
+ROLLOUT_N=2 TOTAL_TRAINING_STEPS=2 \
+bash examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_fl2va_lora.sh \
+  data.train_batch_size=4 \
+  actor_rollout_ref.actor.ppo_mini_batch_size=4 \
+  data.val_max_samples=4 \
+  trainer.save_freq=-1 \
+  trainer.test_freq=1
+```
+
+Use the Ref2VA launcher for the corresponding task. Each mini-batch must
+remain divisible by the actor data-parallel size after multiplying by
+`rollout.n`. This smoke command is a GPU validation procedure, not a claim
+that a GPU run has already passed.
 
 To verify that the two checkpoint directories represent exactly the same base
 policy after fused-QKV and GEGLU conversion, run:
@@ -314,8 +375,8 @@ lists or the singular `image`/`video`/`audio` keys, and videos accept an
 optional `start_time_seconds`:
 
 ```json
-{"prompt":"Turn the reference character toward the camera.","images":["images/a.png","images/b.png"]}
-{"prompt":"Continue the clip with the same voice.","videos":[{"path":"clips/ref.mp4","start_time_seconds":1.5}],"audios":["audio/voice.wav"]}
+{"prompt":"Turn the reference character toward the camera.","images":["images/a.png","images/b.png"],"extra_info":{"resolution":"768x1344","num_frames":141,"frame_rate":24.0}}
+{"prompt":"Continue the clip with the same voice.","videos":[{"path":"clips/ref.mp4","start_time_seconds":1.5}],"audios":["audio/voice.wav"],"extra_info":{"resolution":"1024x1024","num_frames":124,"frame_rate":24.0}}
 ```
 
 Convert the splits to parquet:
@@ -342,7 +403,9 @@ both `Ref2VA/` and `transformer_ref/`:
 
 ```bash
 MODEL_PATH=<MiniMax-H3-root> \
-DATA_DIR=<parquet-directory> \
+TRAIN_DATA_PATH=<parquet-directory>/train.parquet \
+VAL_DATA_PATH=<parquet-directory>/test.parquet \
+REWARD_MODEL_PATH=/models/Qwen3.8-27B \
 REF_IMAGE_SHORT_EDGE=512 \
 VAL_REF_IMAGE_SHORT_EDGE=1024 \
 bash examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_ref2va_lora.sh
@@ -361,10 +424,13 @@ embedding and condition-row counts for the dataset. `TEXT_ENCODER_TP` defaults
 to `ROLLOUT_TP` so the Qwen3-VL encoder is sharded instead of residing on one
 DiT rank; supported values are `1` and `ROLLOUT_TP`.
 
-The initial recipe reuses CLAP and ImageBind to validate joint audio-video
-training. These rewards do not measure similarity to the reference image, so
-a separate reference-aware reward is required before evaluating reference
-fidelity.
+The launcher uses `compute_score_vlm` for reference fidelity, prompt
+alignment, visual quality and temporal consistency. It accepts image references,
+video references, or both, including Ref2VA rows with only video references.
+Reference videos and the complete generated video are sent as video inputs;
+the generated video uses H3's fixed 24 FPS. Reference and generated
+audio are not scored. `REWARD_MODEL_PATH` defaults to `/models/Qwen3.8-27B`,
+and `REWARD_TP=4` must divide `N_GPUS`.
 
 ## T2VA performance reference
 
@@ -388,8 +454,8 @@ improves.
 
 ## FL2VA performance reference
 
-The FL2VA (image-conditioned) run uses the same rank-64 LoRA and CLAP +
-ImageBind multi-reward as T2VA and follows the same layout as above.
+This earlier FL2VA run used rank-64 LoRA and CLAP + ImageBind rewards, as in
+the T2VA reference. Its curves do not describe the current Qwen3.8-27B reward.
 
 <!-- TODO(fl2va): replace the placeholders below with the FL2VA DiffusionNFT run
      curves. Drag the wandb screenshots into a PR comment and paste the resulting
