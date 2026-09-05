@@ -66,6 +66,7 @@ from verl_omni.pipelines.utils import (
     prepare_noisy_latents,
 )
 from verl_omni.utils.fsdp_utils import collect_lora_params
+from verl_omni.utils.ragged_tensors import pack_ragged_tensors, unpack_ragged_tensors
 from verl_omni.workers.config import DiffusionModelConfig
 from verl_omni.workers.engine.lora_adapter_mixin import LoRAAdapterMixin
 
@@ -584,8 +585,21 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                     append_to_dict(aggregated_metrics, metrics)
 
         # concat results from micro batches
+        ragged_latents = any(
+            isinstance(data.get(key, None), torch.Tensor) and data[key].is_nested
+            for key in ("latents_clean", "all_latents")
+        )
+        output_dims = (
+            DiffusionModelBase.get_class(self.model_config).ragged_model_output_dims()
+            if ragged_latents and model_output
+            else {}
+        )
         for key, val in model_output.items():
-            model_output[key] = torch.concat(val, dim=0)  # (global_bsz, steps, ...)
+            if key in output_dims:
+                # Worker chunks must share the jagged contract even when locally homogeneous.
+                model_output[key] = pack_ragged_tensors([item.squeeze(0) for item in val], output_dims[key])
+            else:
+                model_output[key] = torch.concat(val, dim=0)  # (global_bsz, steps, ...)
 
         output = {
             "model_output": model_output,  # a dict of tensors in shape (global_bsz, steps, ...)
@@ -828,15 +842,29 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         tu.assign_non_tensor(data, sp_size=self.ulysses_sequence_parallel_size)
         tu.assign_non_tensor(data, use_dynamic_bsz=False)
 
+        ragged_latents = any(
+            isinstance(data.get(key, None), torch.Tensor) and data[key].is_nested
+            for key in ("latents_clean", "all_latents")
+        )
+        if ragged_latents:
+            # Equal sample counts across DP ranks keep collectives aligned; single-sample
+            # forwards avoid padding and give each sample equal weight.
+            tu.assign_non_tensor(data, micro_batch_size_per_gpu=1)
+
         micro_batches, indices = prepare_micro_batches(
             data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
         )
 
         gradient_accumulation_steps = len(micro_batches) * num_timesteps
+        ragged_dims = tu.get_non_tensor_data(data, "ragged_tensor_dims", default={})
         output_lst = []
         ctx = torch.no_grad() if forward_only else nullcontext()
 
         for micro_batch in micro_batches:
+            if ragged_latents:
+                for key, value in list(micro_batch.items()):
+                    if isinstance(value, torch.Tensor) and value.is_nested:
+                        micro_batch[key] = torch.stack(unpack_ragged_tensors(value, ragged_dims.get(key, 1)))
             micro_batch = micro_batch.to(get_device_id())
             tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
             meta_info_lst = {"model_output": [], "loss": [], "metrics": []}
@@ -848,6 +876,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
                     )
                     if not forward_only:
                         loss.backward()
+                        if ragged_latents:
+                            # Training returns metrics only; discard variable-sized prediction graphs.
+                            meta_info["model_output"] = {}
                     for key, val in meta_info.items():
                         meta_info_lst[key].append(val)
             output_lst.append(meta_info_lst)

@@ -54,6 +54,7 @@ def test_convert_split_serializes_mixed_references(tmp_path):
             "image": "images/character.png",
             "videos": ["videos/motion.mp4", {"path": "videos/detail.mp4", "start_time_seconds": 1.5}],
             "audio": "audios/voice.wav",
+            "extra_info": {"resolution": "1024x1024", "num_frames": 124, "frame_rate": 24.0},
         },
     )
 
@@ -82,6 +83,9 @@ def test_convert_split_serializes_mixed_references(tmp_path):
     assert row["extra_info"]["source_images"] == [image_path]
     assert row["extra_info"]["source_videos"] == video_paths
     assert row["extra_info"]["source_audios"] == [audio_path]
+    assert row["extra_info"]["resolution"] == "1024x1024"
+    assert row["extra_info"]["num_frames"] == 124
+    assert row["extra_info"]["frame_rate"] == 24.0
 
 
 @pytest.mark.parametrize(

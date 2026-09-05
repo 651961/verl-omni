@@ -23,6 +23,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
+from vllm_omni.diffusion.distributed.sp_plan import SequenceParallelConfig, get_sp_plan_from_model
+from vllm_omni.diffusion.hooks.sequence_parallel import apply_sequence_parallel
 from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 from vllm_omni.diffusion.models.minimax_h3.condition_noise import (
     minimax_h3_audio_cond_noise_aug_rows,
@@ -79,7 +81,7 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
     """Adapt ``MiniMaxH3Pipeline`` for single-request T2VA, FL2VA, and Ref2VA FlowGRPO.
 
     Overrides:
-        - ``__init__`` adds request-scoped FlowGRPO and CPS state.
+        - ``__init__`` configures native DiT/VAE parallelism and request-scoped FlowGRPO/CPS state.
         - ``diffuse`` replaces the standard denoise loop with CPS sampling and records target-only video/audio
           transitions, log probabilities, and Actor replay metadata.
         - ``forward`` preserves Agent Loop token IDs, configures FlowGRPO, and attaches the trajectory to
@@ -98,6 +100,25 @@ class MiniMaxH3PipelineWithLogProb(MiniMaxH3WeightSyncMixin, MiniMaxH3Pipeline):
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = ""):
         self._reference_image_short_edge = validate_ref2va_reference_image_short_edge()
         super().__init__(od_config=od_config, prefix=prefix)
+        # Custom pipelines bypass the registry's distributed VAE setup.
+        self.video_vae.set_parallel_size(
+            od_config.parallel_config.vae_patch_parallel_size,
+            mode=od_config.parallel_config.vae_parallel_mode,
+        )
+        # The custom loader also skips the registry's DiT SP hooks.
+        parallel = od_config.parallel_config
+        if parallel.sequence_parallel_size > 1:
+            sp_config = SequenceParallelConfig(
+                ulysses_degree=parallel.ulysses_degree,
+                ring_degree=parallel.ring_degree,
+                allgather_degree=parallel.allgather_degree,
+            )
+            for name in self._dit_modules:
+                transformer = getattr(self, name)
+                plan = get_sp_plan_from_model(transformer)
+                if plan is None:
+                    raise ValueError(f"MiniMax H3 DiT {name} has no sequence-parallel plan.")
+                apply_sequence_parallel(transformer, sp_config, plan)
         self.install_h3_lora_layout()
         self._flow_grpo_noise_level = 0.8
         self._flow_grpo_sde_type = "cps"

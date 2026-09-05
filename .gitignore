@@ -134,3 +134,6 @@ tensorboard_log
 
 # locally downloaded reward weights (ImageBind / CLAP)
 .checkpoints
+
+# locally cached FlashAttention kernels
+.kernels

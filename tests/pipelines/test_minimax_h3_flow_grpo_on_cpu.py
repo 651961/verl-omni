@@ -22,6 +22,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 from vllm_omni.diffusion.data import DiffusionOutput as VllmDiffusionOutput
+from vllm_omni.diffusion.data import DiffusionParallelConfig
 from vllm_omni.diffusion.models.minimax_h3 import MiniMaxH3Pipeline
 
 from verl_omni.pipelines.minimax_h3_diffusion_nft.common import MINIMAX_H3_TOKEN_ID_NATIVE_KEY
@@ -87,6 +88,101 @@ def test_minimax_h3_flow_grpo_registers_both_adapters_and_joint_helpers() -> Non
         audio_weight=0.75,
     )
     torch.testing.assert_close(combined, torch.tensor([2.5]))
+
+
+@pytest.mark.parametrize("parallel_size", [1, 4, 8])
+def test_custom_pipeline_initializes_native_vae_parallelism(monkeypatch, parallel_size) -> None:
+    vae = MagicMock()
+
+    def init_pipeline(self, *, od_config, prefix=""):
+        torch.nn.Module.__init__(self)
+        self.video_vae = vae
+
+    monkeypatch.setattr(MiniMaxH3Pipeline, "__init__", init_pipeline)
+    config = SimpleNamespace(
+        parallel_config=DiffusionParallelConfig(vae_patch_parallel_size=parallel_size, vae_parallel_mode="tile")
+    )
+
+    MiniMaxH3PipelineWithLogProb(od_config=config)
+
+    vae.set_parallel_size.assert_called_once_with(parallel_size, mode="tile")
+
+
+@pytest.mark.parametrize(("sp_size", "sp_rank"), [(1, 0), (2, 1), (4, 2), (8, 7)])
+def test_custom_pipeline_shards_and_gathers_native_dit_sequences(monkeypatch, sp_size, sp_rank) -> None:
+    from vllm_omni.diffusion.distributed import parallel_state, sp_sharding
+    from vllm_omni.diffusion.forward_context import get_forward_context, set_forward_context
+    from vllm_omni.diffusion.models.minimax_h3.minimax_h3_transformer import (
+        MiniMaxH3DiTModel,
+        MiniMaxH3SPGather,
+        MiniMaxH3SPPrepare,
+    )
+
+    def init_pipeline(self, *, od_config, prefix=""):
+        torch.nn.Module.__init__(self)
+        self._dit_modules = ["transformer", "transformers_ref"]
+        self.video_vae = MagicMock()
+        self.text_encoder = torch.nn.Identity()
+        for name in self._dit_modules:
+            transformer = object.__new__(MiniMaxH3DiTModel)
+            torch.nn.Module.__init__(transformer)
+            transformer.sp_prepare = MiniMaxH3SPPrepare()
+            transformer.local_sp_prepare = MiniMaxH3SPPrepare()
+            transformer.sp_gather = MiniMaxH3SPGather()
+            setattr(self, name, transformer)
+
+    monkeypatch.setattr(MiniMaxH3Pipeline, "__init__", init_pipeline)
+    for module in (parallel_state, sp_sharding):
+        monkeypatch.setattr(module, "get_sequence_parallel_world_size", lambda: sp_size)
+        monkeypatch.setattr(module, "get_sequence_parallel_rank", lambda: sp_rank)
+    monkeypatch.setattr(parallel_state, "get_ulysses_parallel_world_size", lambda: sp_size)
+    monkeypatch.setattr(parallel_state, "get_ring_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(parallel_state, "get_allgather_parallel_world_size", lambda: 1)
+    group = MagicMock()
+    monkeypatch.setattr(sp_sharding, "get_sp_group", lambda: group)
+
+    config = SimpleNamespace(
+        parallel_config=DiffusionParallelConfig(
+            tensor_parallel_size=8 // sp_size,
+            ulysses_degree=sp_size,
+            text_encoder_tp_size=8,
+            vae_patch_parallel_size=8,
+        )
+    )
+    pipeline = MiniMaxH3PipelineWithLogProb(od_config=config)
+    pipeline.video_vae.set_parallel_size.assert_called_once_with(8, mode="tile")
+    assert not hasattr(pipeline.text_encoder, "_hook_registry")
+
+    hidden = torch.arange(64 * 8, dtype=torch.float32).reshape(64, 8)
+    rope = hidden[:, :4].clone()
+    indices = torch.arange(64)
+    start, length = sp_rank * 64 // sp_size, 64 // sp_size
+    expected_hidden = hidden.narrow(0, start, length)
+    for name in pipeline._dit_modules:
+        transformer = getattr(pipeline, name)
+        with set_forward_context(omni_diffusion_config=config):
+            assert transformer._rope_local_span(64) == (start, length)
+            sharded_hidden, sharded_rope, sharded_indices = transformer.sp_prepare(hidden, rope, indices)
+            torch.testing.assert_close(sharded_hidden, expected_hidden)
+            torch.testing.assert_close(sharded_rope, rope.narrow(0, start, length))
+            torch.testing.assert_close(sharded_indices, indices.narrow(0, start, length))
+
+            group.all_gather.reset_mock()
+            group.all_gather.return_value = hidden
+            torch.testing.assert_close(transformer.sp_gather(sharded_hidden), hidden)
+            if sp_size > 1:
+                group.all_gather.assert_called_once_with(sharded_hidden, dim=0)
+            else:
+                group.all_gather.assert_not_called()
+            assert get_forward_context()._sp_shard_depth == 0
+
+        with set_forward_context(omni_diffusion_config=config):
+            local_hidden, local_rope, local_indices = transformer.local_sp_prepare(
+                expected_hidden, rope.narrow(0, start, length), indices
+            )
+            torch.testing.assert_close(local_hidden, expected_hidden)
+            torch.testing.assert_close(local_rope, rope.narrow(0, start, length))
+            torch.testing.assert_close(local_indices, indices.narrow(0, start, length))
 
 
 def test_h3_agent_loop_uses_parent_init_and_raw_text_tokens() -> None:

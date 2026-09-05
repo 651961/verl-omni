@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# MiniMax H3 Ref2VA LoRA FlowGRPO with CLAP and ImageBind rewards.
+# MiniMax H3 Ref2VA LoRA FlowGRPO with a Qwen3.8-27B visual reward.
 set -euo pipefail
 
-export WANDB_MODE=${WANDB_MODE:-offline}
+export WANDB_MODE=disabled
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+export HF_HUB_OFFLINE=1
+export LOCAL_KERNELS=kernels-community/flash-attn3=/datasets/codes_zsqiao/verl-omni/.kernels/flash-attn3:kernels-community/flash-attn2=/datasets/codes_zsqiao/verl-omni/.kernels/flash-attn2
 
 : "${DATA_DIR:?Set DATA_DIR to the parquet directory produced by prepare_ref2va_data.py}"
 if [[ -z "${MODEL_PATH:-}" || ! -d "$MODEL_PATH/Ref2VA" || ! -d "$MODEL_PATH/transformer_ref" ]]; then
@@ -16,11 +18,6 @@ N_GPUS=${N_GPUS:-8}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
 TEXT_ENCODER_TP=${TEXT_ENCODER_TP:-$ROLLOUT_TP}
 ROLLOUT_N=${ROLLOUT_N:-8}
-HEIGHT=${HEIGHT:-288}
-WIDTH=${WIDTH:-448}
-VAL_HEIGHT=${VAL_HEIGHT:-576}
-VAL_WIDTH=${VAL_WIDTH:-928}
-NUM_FRAMES=${NUM_FRAMES:-96}
 INFER_STEPS=${INFER_STEPS:-10}
 SDE_WINDOW_SIZE=${SDE_WINDOW_SIZE:-3}
 SDE_WINDOW_END=${SDE_WINDOW_END:-$((INFER_STEPS - 1))}
@@ -30,13 +27,21 @@ VAL_REF_IMAGE_SHORT_EDGE=${VAL_REF_IMAGE_SHORT_EDGE:-$REF_IMAGE_SHORT_EDGE}
 export REF_IMAGE_SHORT_EDGE
 ACTOR_ATTN_BACKEND=${ACTOR_ATTN_BACKEND:-_flash_3_varlen_hub}
 ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-FLASH_ATTN_3_HUB}
-CLAP_MODEL_PATH=${CLAP_MODEL_PATH:-laion/larger_clap_general}
-IMAGEBIND_MODEL_PATH=${IMAGEBIND_MODEL_PATH:-.checkpoints/imagebind_huge.pth}
-REWARD_DEVICE=${REWARD_DEVICE:-cuda}
+REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-/models/Qwen3.8-27B}
+REWARD_TP=${REWARD_TP:-4}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-100}
 
 if (( N_GPUS % ROLLOUT_TP != 0 )); then
     echo "N_GPUS must be divisible by ROLLOUT_TP" >&2
+    exit 1
+fi
+
+if [[ ! -d "$REWARD_MODEL_PATH" ]]; then
+    echo "REWARD_MODEL_PATH must point to the VLM reward checkpoint (got: '$REWARD_MODEL_PATH')" >&2
+    exit 1
+fi
+if (( REWARD_TP <= 0 || N_GPUS % REWARD_TP != 0 )); then
+    echo "REWARD_TP must be positive and divide N_GPUS (got: REWARD_TP=$REWARD_TP, N_GPUS=$N_GPUS)" >&2
     exit 1
 fi
 
@@ -61,6 +66,8 @@ exec > >(tee -a "$log_file") 2>&1
 h3_lora_targets='["to_q","to_k","to_v","to_out.0","ff.net.0.proj","ff.net.2"]'
 
 python3 -m verl_omni.trainer.main_diffusion \
+    "+ray_kwargs.ray_init.runtime_env.env_vars.HF_HUB_OFFLINE='1'" \
+    "+ray_kwargs.ray_init.runtime_env.env_vars.LOCAL_KERNELS='$LOCAL_KERNELS'" \
     algorithm.trainer_type=policy_gradient \
     algorithm.sample_source=online \
     algorithm.adv_estimator=flow_grpo \
@@ -69,9 +76,10 @@ python3 -m verl_omni.trainer.main_diffusion \
     data.val_files="$DATA_DIR/test.parquet" \
     data.train_batch_size=32 \
     data.val_max_samples=128 \
-    data.max_prompt_length=4096 \
+    data.max_prompt_length=8192 \
     data.truncation=error \
     data.seed=42 \
+    data.val_batch_size=4 \
     actor_rollout_ref.model.path="$MODEL_PATH/Ref2VA" \
     actor_rollout_ref.model.tokenizer_path="$MODEL_PATH/Ref2VA/tokenizer" \
     actor_rollout_ref.model.config_path="$MODEL_PATH/transformer_ref" \
@@ -80,8 +88,8 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.model.algorithm=flow_grpo \
     actor_rollout_ref.model.attn_backend="$ACTOR_ATTN_BACKEND" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.model.lora_rank=64 \
-    actor_rollout_ref.model.lora_alpha=128 \
+    actor_rollout_ref.model.lora_rank=128 \
+    actor_rollout_ref.model.lora_alpha=256 \
     actor_rollout_ref.model.target_modules="$h3_lora_targets" \
     actor_rollout_ref.model.fsdp_layer_prefixes="['transformer_blocks.','token_refiner.refiner_blocks.']" \
     '+actor_rollout_ref.actor.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap=[MiniMaxH3TransformerBlock,MiniMaxH3TokenRefinerBlock]' \
@@ -95,6 +103,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.actor.fsdp_config.offload_policy=True \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm_omni \
     actor_rollout_ref.rollout.max_num_seqs=1 \
@@ -112,21 +121,13 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.max_prompt_embed_length="$MAX_PROMPT_EMBEDS" \
     actor_rollout_ref.rollout.pipeline.task=ref2va \
-    actor_rollout_ref.rollout.pipeline.height="$HEIGHT" \
-    actor_rollout_ref.rollout.pipeline.width="$WIDTH" \
-    actor_rollout_ref.rollout.pipeline.num_frames="$NUM_FRAMES" \
-    actor_rollout_ref.rollout.pipeline.frame_rate=24.0 \
     actor_rollout_ref.rollout.pipeline.num_inference_steps="$INFER_STEPS" \
     actor_rollout_ref.rollout.pipeline.true_cfg_scale=1.0 \
     actor_rollout_ref.rollout.pipeline.max_sequence_length="$MAX_PROMPT_EMBEDS" \
     actor_rollout_ref.rollout.pipeline.reference_image_short_edge="$REF_IMAGE_SHORT_EDGE" \
     actor_rollout_ref.rollout.pipeline.video_flow_shift=12.0 \
     +actor_rollout_ref.rollout.pipeline.output_type=pt \
-    actor_rollout_ref.rollout.val_kwargs.pipeline.height="$VAL_HEIGHT" \
-    actor_rollout_ref.rollout.val_kwargs.pipeline.width="$VAL_WIDTH" \
-    actor_rollout_ref.rollout.val_kwargs.pipeline.num_frames="$NUM_FRAMES" \
-    actor_rollout_ref.rollout.val_kwargs.pipeline.frame_rate=24.0 \
-    actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=40 \
+    actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=33 \
     actor_rollout_ref.rollout.val_kwargs.pipeline.true_cfg_scale=1.0 \
     actor_rollout_ref.rollout.val_kwargs.pipeline.max_sequence_length="$MAX_PROMPT_EMBEDS" \
     actor_rollout_ref.rollout.val_kwargs.pipeline.reference_image_short_edge="$VAL_REF_IMAGE_SHORT_EDGE" \
@@ -138,25 +139,20 @@ python3 -m verl_omni.trainer.main_diffusion \
     actor_rollout_ref.rollout.algo.sde_window_size="$SDE_WINDOW_SIZE" \
     actor_rollout_ref.rollout.algo.sde_contiguous=True \
     actor_rollout_ref.rollout.algo.sde_window_seed=42 \
-    reward.num_workers=1 \
-    reward.reward_model.enable=False \
-    reward.custom_reward_function.path=pkg://verl_omni.reward_loop.reward_manager.multi \
-    reward.custom_reward_function.name=_multi_reward_placeholder \
-    reward.reward_manager.name=MultiVisualRewardManager \
+    reward.reward_model.enable=True \
+    reward.reward_model.model_path="$REWARD_MODEL_PATH" \
+    reward.reward_model.rollout.name=vllm \
+    "+reward.reward_model.rollout.engine_kwargs.vllm.override_generation_config='{}'" \
+    reward.reward_model.enable_resource_pool=False \
+    reward.reward_model.rollout.tensor_model_parallel_size="$REWARD_TP" \
+    reward.reward_model.rollout.max_num_seqs=16 \
+    reward.reward_model.rollout.free_cache_engine=True \
+    reward.num_workers=$((N_GPUS / REWARD_TP)) \
+    reward.custom_reward_function.path=pkg://verl_omni.utils.reward_score.vlm_reward \
+    reward.custom_reward_function.name=compute_score_vlm \
+    reward.reward_manager.name=VisualRewardManager \
     reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager \
-    "+reward.reward_functions.clap.path=$repo_root/verl_omni/utils/reward_score/clap.py" \
-    '+reward.reward_functions.clap.name=compute_score' \
-    '+reward.reward_functions.clap.weight=1.0' \
-    "+reward.reward_functions.clap.device=$REWARD_DEVICE:0" \
-    "+reward.reward_functions.clap.model_name_or_path=$CLAP_MODEL_PATH" \
-    "+reward.reward_functions.imagebind.path=$repo_root/verl_omni/utils/reward_score/imagebind.py" \
-    '+reward.reward_functions.imagebind.name=compute_score' \
-    '+reward.reward_functions.imagebind.weight=1.0' \
-    "+reward.reward_functions.imagebind.device=$REWARD_DEVICE:1" \
-    "+reward.reward_functions.imagebind.model_name_or_path=$IMAGEBIND_MODEL_PATH" \
-    '+reward.reward_functions.imagebind.mode=audio_video' \
-    reward.aggregation=weighted_sum \
-    trainer.logger='["console","wandb"]' \
+    trainer.logger='["console","tensorboard"]' \
     trainer.project_name=flow_grpo \
     trainer.experiment_name=minimax_h3_ref2va_lora \
     trainer.default_local_dir="$checkpoint_dir" \

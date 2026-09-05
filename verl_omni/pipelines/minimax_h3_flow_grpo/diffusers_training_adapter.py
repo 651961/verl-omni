@@ -72,6 +72,25 @@ class MiniMaxH3FlowGRPO(DiffusionModelBase):
     """Replay flattened joint video/audio transitions with the H3 DiT."""
 
     @classmethod
+    def ragged_rollout_tensor_dims(cls) -> dict[str, int]:
+        """Declare joint trajectory widths and per-sample packed-layout axes."""
+        return {
+            "all_latents": 3,
+            "all_next_latents": 3,
+            "h3_position_ids": 1,
+            "h3_token_tags": 1,
+            "h3_video_indices": 1,
+            "h3_audio_indices": 1,
+            "h3_text_indices": 1,
+            "h3_video_update_mask": 1,
+        }
+
+    @classmethod
+    def ragged_model_output_dims(cls) -> dict[str, int]:
+        """Only transition means vary in size; log-probs stay [batch, steps]."""
+        return {"prev_sample_mean": 3}
+
+    @classmethod
     def prepare_processor_files(cls, model_path: str) -> str:
         """Make the official Qwen3-VL processor discoverable by AutoProcessor."""
         return prepare_h3_processor_files(model_path)

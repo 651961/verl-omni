@@ -16,15 +16,65 @@
 from collections.abc import Sequence
 from typing import Any, Optional
 
+import numpy as np
+import torch
+from tensordict import TensorDict
 from verl import DataProto
 from verl.trainer.distillation import is_distillation_enabled
+from verl.utils import tensordict_utils as tu
+
+from verl_omni.utils.ragged_tensors import pack_ragged_tensors, unpack_ragged_tensors
 
 
 def _to_diffusion_worker_tensordict(batch: DataProto):
-    """Project a driver batch for actor/ref workers without copying tensor storage."""
+    """Project a driver batch for workers, preserving dense tensor storage."""
     worker_batch = batch.to_tensordict()
     worker_batch.pop("responses", None)
+    worker_batch.pop("audio", None)
+    ragged_dims = dict(batch.meta_info.get("ragged_tensor_dims", {}))
+    for key in batch.non_tensor_batch:
+        if f"{key}_ragged_dim" in batch.meta_info:
+            ragged_dims[key] = batch.meta_info[f"{key}_ragged_dim"]
+    for key, ragged_dim in ragged_dims.items():
+        if key not in batch.non_tensor_batch:
+            continue
+        values = list(batch.non_tensor_batch[key])
+        if not all(isinstance(value, torch.Tensor) and 1 <= ragged_dim <= value.ndim for value in values):
+            raise ValueError(f"Ragged {key} requires one tensor per sample with axis {ragged_dim}.")
+        worker_batch[key] = pack_ragged_tensors(values, ragged_dim)
+    if ragged_dims:
+        tu.assign_non_tensor(worker_batch, ragged_tensor_dims=ragged_dims)
     return worker_batch
+
+
+def _diffusion_outputs_to_dataproto(output, field_map: dict[str, str], model_config) -> DataProto:
+    """Rename policy outputs and restore variable tensors to driver-side objects.
+
+    Each output carries its own axis metadata so old/ref/teacher results can be
+    unioned independently without conflicting with rollout metadata.
+    """
+    from verl_omni.pipelines.model_base import DiffusionModelBase
+
+    tensors, non_tensors, metadata = {}, {}, {}
+    for source, destination in field_map.items():
+        value = tu.get(output, source)
+        if value is None:
+            continue
+        value = value.float()
+        if value.is_nested:
+            ragged_dim = DiffusionModelBase.get_class(model_config).ragged_model_output_dims()[source]
+            samples = unpack_ragged_tensors(value, ragged_dim)
+            objects = np.empty(len(samples), dtype=object)
+            objects[:] = [sample.cpu() for sample in samples]
+            non_tensors[destination] = objects
+            metadata[f"{destination}_ragged_dim"] = ragged_dim
+        else:
+            tensors[destination] = value
+    result = DataProto.from_dict(tensors=tensors, non_tensors=non_tensors, meta_info=metadata)
+    if result.batch is None:
+        # DataProto.union needs a TensorDict even for object-only teacher outputs.
+        result.batch = TensorDict({}, batch_size=[len(result)])
+    return result
 
 
 OLD_POLICY_DECAY_SCHEDULES = {

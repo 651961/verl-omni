@@ -69,6 +69,7 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
 )
 from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
     NoOpCheckpointManager,
+    _diffusion_outputs_to_dataproto,
     _to_diffusion_worker_tensordict,
     old_policy_decay,
     validate_distillation_config,
@@ -81,6 +82,7 @@ from verl_omni.trainer.diffusion.rollout_correction import (
     rollout_correction_enabled,
 )
 from verl_omni.trainer.diffusion.teacher_manager import DiffusionTeacherManager
+from verl_omni.utils.batch_fields import get_batch_field
 from verl_omni.utils.tracking import _export_video, batch_items, log_wandb_media, wrap_val_samples_for_wandb
 from verl_omni.workers.utils.padding import embeds_padding_2_no_padding
 
@@ -372,7 +374,15 @@ class BaseRayDiffusionTrainer(ABC):
         Failed video exports are preserved as ``{i}.pt`` fallback payloads and recorded
         in the JSONL instead of terminating training.
         """
-        if not isinstance(outputs, torch.Tensor) or outputs.dtype != torch.uint8:
+        if isinstance(outputs, list | tuple | np.ndarray):
+            output_items = list(outputs)
+            if not all(isinstance(item, torch.Tensor) and item.dtype == torch.uint8 for item in output_items):
+                raise ValueError("Expected generation outputs to be uint8 tensors.")
+            output_items = [item.squeeze(0) if item.ndim == 5 and item.shape[0] == 1 else item for item in output_items]
+            n_full = len(output_items)
+        elif isinstance(outputs, torch.Tensor) and outputs.dtype == torch.uint8:
+            n_full = outputs.shape[0]
+        else:
             dtype = getattr(outputs, "dtype", type(outputs))
             raise ValueError(f"Expected generation outputs to be a uint8 tensor, got {dtype}.")
 
@@ -381,15 +391,16 @@ class BaseRayDiffusionTrainer(ABC):
         visual_folder = os.path.join(dump_path, f"{self.global_steps}")
         os.makedirs(visual_folder, exist_ok=True)
 
-        n_full = outputs.shape[0]
         n = n_full if max_samples is None else min(max_samples, n_full)
-        if outputs.ndim == 6:
-            # Per-sample batch dim from single-seq rollouts: [N, 1, T, C, H, W].
-            outputs = outputs.squeeze(1)
-        if outputs.ndim == 5 and outputs.shape[1] == 3 and outputs.shape[2] != 3:
-            # Channels-first [N, C, T, H, W] -> [N, T, C, H, W].
-            outputs = outputs.permute(0, 2, 1, 3, 4)
-        is_video = outputs.ndim == 5  # [N, T, C, H, W] vs image [N, C, H, W]
+        if isinstance(outputs, torch.Tensor):
+            if outputs.ndim == 6:
+                # Per-sample batch dim from single-seq rollouts: [N, 1, T, C, H, W].
+                outputs = outputs.squeeze(1)
+            if outputs.ndim == 5 and outputs.shape[1] == 3 and outputs.shape[2] != 3:
+                # Channels-first [N, C, T, H, W] -> [N, T, C, H, W].
+                outputs = outputs.permute(0, 2, 1, 3, 4)
+            output_items = [outputs[i] for i in range(n_full)]
+        is_video = bool(output_items and output_items[0].ndim == 4)
 
         output_paths = []
         output_fallback_paths = [None] * n
@@ -401,7 +412,7 @@ class BaseRayDiffusionTrainer(ABC):
                 video_path = os.path.join(visual_folder, f"{i}.mp4")
                 try:
                     _export_video(
-                        outputs[i],
+                        output_items[i],
                         video_path,
                         fps=fps,
                         audio=audios[i],
@@ -414,7 +425,7 @@ class BaseRayDiffusionTrainer(ABC):
                     if isinstance(fallback_audio, torch.Tensor):
                         fallback_audio = fallback_audio.detach().cpu()
                     fallback = {
-                        "video": outputs[i].detach().cpu(),
+                        "video": output_items[i].detach().cpu(),
                         "audio": fallback_audio,
                         "audio_sample_rate": audio_sample_rates[i],
                     }
@@ -438,8 +449,8 @@ class BaseRayDiffusionTrainer(ABC):
                 else:
                     output_paths.append(video_path)
         else:
-            images_pil = outputs[:n].cpu().permute(0, 2, 3, 1).numpy()
-            for i, image in enumerate(images_pil):
+            for i in range(n):
+                image = output_items[i].cpu().permute(1, 2, 0).numpy()
                 image_path = os.path.join(visual_folder, f"{i}.jpg")
                 Image.fromarray(image).save(image_path)
                 output_paths.append(image_path)
@@ -483,7 +494,7 @@ class BaseRayDiffusionTrainer(ABC):
         """
         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
-            outputs = batch.batch["responses"]
+            outputs = get_batch_field(batch, "responses")
             scores = batch.batch["sample_level_scores"].sum(-1).cpu().tolist()
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
 
@@ -657,10 +668,10 @@ class BaseRayDiffusionTrainer(ABC):
             print("validation generation end")
 
             # Store generated outputs
-            output_images = test_output_gen_batch.batch["responses"]
-            sample_outputs.append(output_images)
+            output_images = get_batch_field(test_output_gen_batch, "responses")
+            sample_outputs.extend(output_images)
             batch_size = len(output_images)
-            sample_audios.extend(batch_items(test_output_gen_batch.batch.get("audio"), batch_size, "audio"))
+            sample_audios.extend(batch_items(get_batch_field(test_output_gen_batch, "audio"), batch_size, "audio"))
             sample_audio_sample_rates.extend(
                 batch_items(
                     test_output_gen_batch.non_tensor_batch.get("audio_sample_rate"),
@@ -699,7 +710,6 @@ class BaseRayDiffusionTrainer(ABC):
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
-        sample_outputs = torch.cat(sample_outputs, dim=0)
         self._maybe_log_val_generations(
             inputs=sample_inputs,
             outputs=sample_outputs,
@@ -1164,12 +1174,11 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
         else:
             output = self.ref_policy_wg.infer_ref_batch(batch_td)
         # gather output
-        log_probs = tu.get(output, "log_probs")
-        prev_sample_mean = tu.get(output, "prev_sample_mean")
-        ref_log_prob = tu.get_tensordict(
-            {"ref_log_prob": log_probs.float(), "ref_prev_sample_mean": prev_sample_mean.float()}
+        return _diffusion_outputs_to_dataproto(
+            output,
+            {"log_probs": "ref_log_prob", "prev_sample_mean": "ref_prev_sample_mean"},
+            self.config.actor_rollout_ref.model,
         )
-        return DataProto.from_tensordict(ref_log_prob)
 
     def _compute_old_log_prob(self, batch: DataProto) -> tuple[DataProto, Optional[float]]:
         batch_td = _to_diffusion_worker_tensordict(batch)
@@ -1182,14 +1191,13 @@ class PolicyGradientRayTrainer(BaseRayDiffusionTrainer):
             vae_scale_factor=self.config.actor_rollout_ref.model.get("vae_scale_factor", 8),
         )
         output = self.actor_rollout_wg.infer_actor_batch(batch_td)
-        log_probs = tu.get(output, "log_probs")
-        old_log_prob_dict = {"old_log_probs": log_probs.float()}
-        prev_sample_mean = tu.get(output, "prev_sample_mean")
-        if prev_sample_mean is not None:
-            old_log_prob_dict["old_prev_sample_mean"] = prev_sample_mean.float()
-        old_log_prob = tu.get_tensordict(old_log_prob_dict)
+        old_log_prob = _diffusion_outputs_to_dataproto(
+            output,
+            {"log_probs": "old_log_probs", "prev_sample_mean": "old_prev_sample_mean"},
+            self.config.actor_rollout_ref.model,
+        )
         old_log_prob_mfu = tu.get(output, "metrics").get("mfu")
-        return DataProto.from_tensordict(old_log_prob), old_log_prob_mfu
+        return old_log_prob, old_log_prob_mfu
 
     def fit(self):
         """

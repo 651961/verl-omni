@@ -3,27 +3,25 @@
 # References may mix images, videos and standalone audio (up to twelve files).
 set -euo pipefail
 
-export WANDB_MODE=${WANDB_MODE:-online}
-export WANDB_RUN_ID=${WANDB_RUN_ID:-minimax_h3_ref2va_lora}
-export WANDB_RESUME=${WANDB_RESUME:-allow}
+export WANDB_MODE=disabled
 export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
-: "${DATA_DIR:?Set DATA_DIR to the parquet directory produced by prepare_ref2va_data.py}"
-if [[ -z "${MODEL_PATH:-}" || ! -d "$MODEL_PATH/Ref2VA" || ! -d "$MODEL_PATH/transformer_ref" ]]; then
-    echo "MODEL_PATH must point to a MiniMax-H3 repo root containing Ref2VA/ (fused rollout) and transformer_ref/ (diffusers actor) (got: '${MODEL_PATH:-<unset>}')" >&2
+: "${MODEL_PATH:?Set MODEL_PATH to the MiniMax-H3 checkpoint directory}"
+: "${TRAIN_DATA_PATH:?Set TRAIN_DATA_PATH to the training parquet file}"
+: "${VAL_DATA_PATH:?Set VAL_DATA_PATH to the validation parquet file}"
+
+if [[ ! -d "$MODEL_PATH/Ref2VA" || ! -d "$MODEL_PATH/transformer_ref" ]]; then
+    echo "MODEL_PATH must point to a MiniMax-H3 repo root containing Ref2VA/ (fused rollout) and transformer_ref/ (diffusers actor) (got: '$MODEL_PATH')" >&2
     exit 1
 fi
 
 N_GPUS=${N_GPUS:-8}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
 TEXT_ENCODER_TP=${TEXT_ENCODER_TP:-$ROLLOUT_TP}
-ROLLOUT_N=${ROLLOUT_N:-16}
-HEIGHT=${HEIGHT:-288}
-WIDTH=${WIDTH:-448}
-VAL_HEIGHT=${VAL_HEIGHT:-576}
-VAL_WIDTH=${VAL_WIDTH:-928}
-NUM_FRAMES=${NUM_FRAMES:-96}
+REWARD_MODEL_PATH=${REWARD_MODEL_PATH:-/models/Qwen3.8-27B}
+REWARD_TP=${REWARD_TP:-4}
+ROLLOUT_N=${ROLLOUT_N:-8}
 INFER_STEPS=${INFER_STEPS:-10}
 MAX_PROMPT_EMBEDS=${MAX_PROMPT_EMBEDS:-12288}
 REF_IMAGE_SHORT_EDGE=${REF_IMAGE_SHORT_EDGE:-2048}
@@ -33,17 +31,20 @@ ACTOR_ATTN_BACKEND=${ACTOR_ATTN_BACKEND:-_flash_3_varlen_hub}
 ROLLOUT_ATTN_BACKEND=${ROLLOUT_ATTN_BACKEND:-FLASH_ATTN_3_HUB}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-1000}
 
+if [[ ! -d "$REWARD_MODEL_PATH" ]]; then
+    echo "REWARD_MODEL_PATH must point to the VLM reward checkpoint (got: '$REWARD_MODEL_PATH')" >&2
+    exit 1
+fi
+if (( REWARD_TP <= 0 || N_GPUS % REWARD_TP != 0 )); then
+    echo "REWARD_TP must be positive and divide N_GPUS (got: REWARD_TP=$REWARD_TP, N_GPUS=$N_GPUS)" >&2
+    exit 1
+fi
+
 script_path=$(readlink -f "$0")
 script_name=$(basename "$script_path" .sh)
-repo_root=$(dirname "$script_path")
-while [[ "$repo_root" != "/" && ! -f "$repo_root/LICENSE" ]]; do
-    repo_root=$(dirname "$repo_root")
-done
 output_dir=${OUTPUT_DIR:-$(dirname "$script_path")/outputs/$script_name}
 checkpoint_dir=$output_dir/checkpoints
-run_timestamp=$(date +"%Y%m%d_%H%M")
-log_file=$output_dir/logs/$run_timestamp/${NODE_RANK:-0}.log
-mkdir -p "$checkpoint_dir" "$(dirname "$log_file")"
+mkdir -p "$checkpoint_dir"
 
 lora_warmstart_arg=()
 if [[ -n "${LORA_WARMSTART_PATH:-}" ]]; then
@@ -57,11 +58,11 @@ python3 -m verl_omni.trainer.main_diffusion \
   algorithm.timestep_fraction=1.0 \
   algorithm.old_policy_decay_schedule=delayed_linear_to_0_999 \
   algorithm.old_policy_update_interval=2 \
-  data.train_files="$DATA_DIR/train.parquet" \
-  data.val_files="$DATA_DIR/test.parquet" \
+  data.train_files="$TRAIN_DATA_PATH" \
+  data.val_files="$VAL_DATA_PATH" \
   data.train_batch_size=32 \
   data.val_max_samples=128 \
-  data.max_prompt_length=4096 \
+  data.max_prompt_length=8192 \
   data.truncation=error \
   data.seed=42 \
   actor_rollout_ref.model.path="$MODEL_PATH/Ref2VA" \
@@ -73,8 +74,8 @@ python3 -m verl_omni.trainer.main_diffusion \
   actor_rollout_ref.model.model_type=diffusion_nft_model \
   actor_rollout_ref.model.attn_backend="$ACTOR_ATTN_BACKEND" \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
-  actor_rollout_ref.model.lora_rank=64 \
-  actor_rollout_ref.model.lora_alpha=128 \
+  actor_rollout_ref.model.lora_rank=128 \
+  actor_rollout_ref.model.lora_alpha=256 \
   "${lora_warmstart_arg[@]}" \
   actor_rollout_ref.model.policy_state_adapters='["default","old"]' \
   actor_rollout_ref.model.target_modules='["to_q","to_k","to_v","to_out.0","ff.net.0.proj","ff.net.2"]' \
@@ -86,7 +87,7 @@ python3 -m verl_omni.trainer.main_diffusion \
   actor_rollout_ref.actor.optim.override_optimizer_config="{eps: 1e-8}" \
   actor_rollout_ref.actor.optim.clip_grad=1.0 \
   actor_rollout_ref.actor.ppo_mini_batch_size=16 \
-  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
   actor_rollout_ref.actor.diffusion_loss.loss_mode=diffusion_nft \
   actor_rollout_ref.actor.diffusion_loss.clip_ratio=1e-5 \
   actor_rollout_ref.actor.diffusion_loss.mix_beta=0.1 \
@@ -114,44 +115,31 @@ python3 -m verl_omni.trainer.main_diffusion \
   +actor_rollout_ref.rollout.engine_kwargs.vllm_omni.enable_layerwise_offload=True \
   actor_rollout_ref.rollout.max_prompt_embed_length="$MAX_PROMPT_EMBEDS" \
   actor_rollout_ref.rollout.pipeline.task=ref2va \
-  actor_rollout_ref.rollout.pipeline.height="$HEIGHT" \
-  actor_rollout_ref.rollout.pipeline.width="$WIDTH" \
-  actor_rollout_ref.rollout.pipeline.num_frames="$NUM_FRAMES" \
-  actor_rollout_ref.rollout.pipeline.frame_rate=24.0 \
   actor_rollout_ref.rollout.pipeline.num_inference_steps="$INFER_STEPS" \
   actor_rollout_ref.rollout.pipeline.true_cfg_scale=1.0 \
   actor_rollout_ref.rollout.pipeline.max_sequence_length="$MAX_PROMPT_EMBEDS" \
   actor_rollout_ref.rollout.pipeline.reference_image_short_edge="$REF_IMAGE_SHORT_EDGE" \
   actor_rollout_ref.rollout.pipeline.video_flow_shift=12.0 \
   +actor_rollout_ref.rollout.pipeline.output_type=pt \
-  actor_rollout_ref.rollout.val_kwargs.pipeline.height="$VAL_HEIGHT" \
-  actor_rollout_ref.rollout.val_kwargs.pipeline.width="$VAL_WIDTH" \
-  actor_rollout_ref.rollout.val_kwargs.pipeline.num_frames="$NUM_FRAMES" \
-  actor_rollout_ref.rollout.val_kwargs.pipeline.frame_rate=24.0 \
-  actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=40 \
+  actor_rollout_ref.rollout.val_kwargs.pipeline.num_inference_steps=33 \
   actor_rollout_ref.rollout.val_kwargs.pipeline.true_cfg_scale=1.0 \
   actor_rollout_ref.rollout.val_kwargs.pipeline.reference_image_short_edge="$VAL_REF_IMAGE_SHORT_EDGE" \
   +actor_rollout_ref.rollout.val_kwargs.pipeline.output_type=pt \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
-  reward.reward_model.enable=False \
-  reward.num_workers=1 \
-  reward.custom_reward_function.path=pkg://verl_omni.reward_loop.reward_manager.multi \
-  reward.custom_reward_function.name=_multi_reward_placeholder \
-  reward.reward_manager.name=MultiVisualRewardManager \
+  data.val_batch_size=4 \
+  reward.reward_model.enable=True \
+  reward.reward_model.model_path="$REWARD_MODEL_PATH" \
+  reward.reward_model.rollout.name=vllm \
+  reward.reward_model.enable_resource_pool=False \
+  reward.reward_model.rollout.tensor_model_parallel_size="$REWARD_TP" \
+  reward.reward_model.rollout.max_num_seqs=1 \
+  reward.reward_model.rollout.free_cache_engine=True \
+  reward.num_workers=$((N_GPUS / REWARD_TP)) \
+  reward.custom_reward_function.path=pkg://verl_omni.utils.reward_score.vlm_reward \
+  reward.custom_reward_function.name=compute_score_vlm \
+  reward.reward_manager.name=VisualRewardManager \
   reward.reward_manager.module.path=pkg://verl_omni.reward_loop.reward_manager \
-  "+reward.reward_functions.clap.path=$repo_root/verl_omni/utils/reward_score/clap.py" \
-  '+reward.reward_functions.clap.name=compute_score' \
-  '+reward.reward_functions.clap.weight=1.0' \
-  '+reward.reward_functions.clap.device=cuda:0' \
-  '+reward.reward_functions.clap.model_name_or_path=laion/larger_clap_general' \
-  "+reward.reward_functions.imagebind.path=$repo_root/verl_omni/utils/reward_score/imagebind.py" \
-  '+reward.reward_functions.imagebind.name=compute_score' \
-  '+reward.reward_functions.imagebind.weight=1.0' \
-  '+reward.reward_functions.imagebind.device=cuda:1' \
-  '+reward.reward_functions.imagebind.model_name_or_path=.checkpoints/imagebind_huge.pth' \
-  '+reward.reward_functions.imagebind.mode=audio_video' \
-  reward.aggregation=weighted_sum \
-  trainer.logger='["console","tensorboard","wandb"]' \
+  trainer.logger='["console","tensorboard"]' \
   trainer.project_name=diffusion_nft \
   trainer.experiment_name=minimax_h3_ref2va_lora \
   trainer.default_local_dir="$checkpoint_dir" \
@@ -164,7 +152,7 @@ python3 -m verl_omni.trainer.main_diffusion \
   trainer.val_before_train=True \
   trainer.n_gpus_per_node="$N_GPUS" \
   trainer.nnodes=1 \
-  trainer.save_freq=5 \
+  trainer.save_freq=10 \
   trainer.test_freq=10 \
   trainer.total_epochs=15 \
   trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \

@@ -103,6 +103,12 @@ class DiffusionStrategy(OmniStrategyBase):
     def prepare_engine_args(self, engine_args: dict[str, Any], args: Namespace) -> None:
         import_external_libs(self.server.config.external_lib)
 
+        # The CLI accepts this field, but neither OmniEngineArgs nor
+        # OrchestratorArgs retains it on the pinned vLLM-Omni version.
+        text_encoder_tp_size = getattr(args, "text_encoder_tp_size", None)
+        if text_encoder_tp_size is not None:
+            engine_args["text_encoder_tp_size"] = int(text_encoder_tp_size)
+
         pipeline_path = VllmOmniPipelineBase.get_pipeline_path(
             architecture=self.server.model_config.architecture,
             algorithm=self.server.model_config.algorithm,

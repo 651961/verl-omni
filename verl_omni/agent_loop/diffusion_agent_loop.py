@@ -371,6 +371,34 @@ class DiffusionAgentLoopWorker:
         input_non_tensor_batch: dict | None = None,
     ) -> DataProto:
         """Process the padded outputs from _run_agent_loop and combine them into a batch."""
+        ragged_keys = set(inputs[0].extra_fields.get("ragged_tensor_keys", ()))
+        ragged_dims = inputs[0].extra_fields.get("ragged_tensor_dims", {})
+        if any(set(item.extra_fields.get("ragged_tensor_keys", ())) != ragged_keys for item in inputs):
+            raise ValueError("Diffusion batch mixes incompatible ragged tensor contracts.")
+        if not set(ragged_dims).issubset(ragged_keys) or any(
+            item.extra_fields.get("ragged_tensor_dims", {}) != ragged_dims for item in inputs
+        ):
+            raise ValueError("Diffusion batch mixes incompatible ragged tensor dimensions.")
+        ragged_fields = {}
+        for key in ragged_keys:
+            values = [
+                item.response_diffusion_output if key == "responses" else item.extra_fields.get(key) for item in inputs
+            ]
+            if all(value is None for value in values):
+                continue
+            if not all(isinstance(value, torch.Tensor) and value.shape[0] == 1 for value in values):
+                raise ValueError(f"Ragged field {key} must contain one tensor per rollout.")
+            items = np.empty(len(values), dtype=object)
+            for index, value in enumerate(values):
+                items[index] = value.squeeze(0).detach().cpu()
+            ragged_fields[key] = items
+            if key != "responses":
+                for item in inputs:
+                    del item.extra_fields[key]
+        for item in inputs:
+            item.extra_fields.pop("ragged_tensor_keys", None)
+            item.extra_fields.pop("ragged_tensor_dims", None)
+
         for key in ("condition_video_rows", "condition_audio_rows"):
             values = [item.extra_fields.get(key) for item in inputs]
             present = [value for value in values if isinstance(value, torch.Tensor)]
@@ -389,8 +417,9 @@ class DiffusionAgentLoopWorker:
 
         # Convert lists back to tensors and stack them to create a batch.
         prompt_ids = torch.cat([input.prompt_ids for input in inputs], dim=0)
-        response_diffusion_output = torch.cat([input.response_diffusion_output for input in inputs], dim=0)
         optional_outputs = {}
+        if "responses" not in ragged_fields:
+            optional_outputs["responses"] = torch.cat([input.response_diffusion_output for input in inputs], dim=0)
         if inputs[0].response_logprobs is not None:
             optional_outputs["rollout_log_probs"] = torch.cat([input.response_logprobs for input in inputs], dim=0)
 
@@ -404,7 +433,6 @@ class DiffusionAgentLoopWorker:
         batch = TensorDict(
             {
                 "prompts": prompt_ids,  # [bsz, prompt_length]
-                "responses": response_diffusion_output,  # [bsz, C, H, W] or [bsz, T, C, H, W]
                 **optional_outputs,
             },
             batch_size=len(inputs),
@@ -437,6 +465,7 @@ class DiffusionAgentLoopWorker:
             extra_fields[key] = temp_arr
 
         non_tensor_batch.update(extra_fields)
+        non_tensor_batch.update(ragged_fields)
 
         # Only include reward_extra_keys in meta_info if rm_scores is in batch
         # This avoids conflicts when reward_tensor is merged later in ray_trainer.py
@@ -444,6 +473,9 @@ class DiffusionAgentLoopWorker:
             meta_info = {"metrics": metrics, "reward_extra_keys": reward_extra_keys}
         else:
             meta_info = {"metrics": metrics}
+
+        if ragged_dims:
+            meta_info["ragged_tensor_dims"] = ragged_dims
 
         return DataProto(
             batch=batch,
