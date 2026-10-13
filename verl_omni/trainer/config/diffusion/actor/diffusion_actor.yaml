@@ -29,6 +29,15 @@ diffusion_loss:
   # Loss function mode: follows actor_rollout_ref.model.algorithm
   loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
 
+  # ART kernel overrides; defaults match the source velocity objective.
+  art_loss_options: {}
+
+  # ART complete-prompt covariance overrides.
+  art_covariance_options:
+
+    # Clear roundoff for exactly constant group rewards.
+    zero_signal_mode: exact
+
   # PPO clip ratio
   clip_ratio: 0.0001
 

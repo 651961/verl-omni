@@ -87,7 +87,7 @@ def _to_object_array(value: Any) -> np.ndarray:
     return arr
 
 
-def _stack_field(value: Any, padding: float = 0.0) -> torch.Tensor | None:
+def _stack_field(value: Any, padding: float = 0.0, *, pad_all_dims: bool = False) -> torch.Tensor | None:
     """Normalize a TransferQueue-returned field into a stacked tensor.
 
     Diffusion worker outputs are pre-padded to fixed shapes (prompt_length for
@@ -107,6 +107,14 @@ def _stack_field(value: Any, padding: float = 0.0) -> torch.Tensor | None:
         tensors = [v if isinstance(v, torch.Tensor) else torch.as_tensor(v) for v in value]
         if not tensors:
             return None
+        if pad_all_dims and all(t.ndim == tensors[0].ndim for t in tensors) and tensors[0].ndim >= 2:
+            # Ragged image canvases and latent token counts can vary on more
+            # than axis zero. This also preserves four-channel RGBA responses.
+            shape = tuple(max(t.shape[axis] for t in tensors) for axis in range(tensors[0].ndim))
+            result = tensors[0].new_full((len(tensors), *shape), padding)
+            for row, tensor in enumerate(tensors):
+                result[(row, *(slice(0, n) for n in tensor.shape))] = tensor
+            return result
         return torch.nn.utils.rnn.pad_sequence(tensors, batch_first=True, padding_value=padding)
     return torch.as_tensor(value)
 
@@ -145,7 +153,7 @@ def diffusion_tq_batch_to_dataproto(
         padding = float(pad_token_id) if field == "prompts" else 0.0
         stacked = None
         try:
-            stacked = _stack_field(value, padding=padding)
+            stacked = _stack_field(value, padding=padding, pad_all_dims=field == "responses")
         except (TypeError, ValueError, RuntimeError):
             # Non-numeric/object fields are forwarded via non_tensor_batch.
             stacked = None
@@ -166,6 +174,25 @@ def diffusion_tq_batch_to_dataproto(
                 if k not in non_tensor_batch:
                     non_tensor_batch[k] = np.full(len(extra_fields_arr), None, dtype=object)
                 non_tensor_batch[k][i] = v
+
+    if "art_cache" in non_tensor_batch:
+        caches = non_tensor_batch["art_cache"]
+        uids = non_tensor_batch.get("uid")
+        if uids is None:
+            raise ValueError("ART transport requires prompt group uids.")
+        shared_keys = ("conditions", "timesteps", "sigmas", "dt")
+        groups = {}
+        for uid, cache in zip(uids, caches, strict=True):
+            if isinstance(cache, dict) and all(k in cache for k in shared_keys):
+                groups.setdefault(str(uid), cache)
+        for row, (uid, cache) in enumerate(zip(uids, caches, strict=True)):
+            if not isinstance(cache, dict):
+                raise ValueError("ART trajectory was lost during TransferQueue transport.")
+            missing = [k for k in shared_keys if k not in cache]
+            if missing:
+                if str(uid) not in groups:
+                    raise ValueError("ART transport requires a complete prompt group with shared conditions.")
+                caches[row] = {**cache, **{k: groups[str(uid)][k] for k in missing}}
 
     batch = TensorDict(batch_dict, batch_size=len(keys))
     return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)

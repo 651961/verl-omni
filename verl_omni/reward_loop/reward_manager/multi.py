@@ -27,7 +27,7 @@ from verl.utils.import_utils import load_extern_object
 from verl_omni.workers.config.reward import get_reward_model_entries, resolve_reward_model_name
 
 from .media import _reward_extra_info
-from .visual import _sampling_params_from_rollout, _validate_visual_response
+from .visual import _sampling_params_from_rollout, _validate_visual_response, _visual_response
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +272,7 @@ class MultiVisualRewardManager(MultiRewardManager):
 
     async def _build_reward_kwargs(self, data_item: DataProto) -> dict:
         """Preserve the existing visual manager input and router contract."""
-        response_visual = data_item.batch["responses"]
+        response_visual = _visual_response(data_item)
         _validate_visual_response(
             response_visual,
             self.config,

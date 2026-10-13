@@ -42,6 +42,10 @@ actor_rollout_ref:
       forward_only: false
       strategy: fsdp
       dtype: bfloat16
+      mixed_precision:
+        param_dtype: bf16
+        reduce_dtype: fp32
+        buffer_dtype: fp32
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: torch
@@ -85,6 +89,9 @@ actor_rollout_ref:
     diffusion_loss:
       _target_: verl_omni.workers.config.diffusion.DiffusionLossConfig
       loss_mode: ${oc.select:actor_rollout_ref.model.algorithm,flow_grpo}
+      art_loss_options: {}
+      art_covariance_options:
+        zero_signal_mode: exact
       clip_ratio: 0.0001
       adv_clip_max: 5.0
       mix_beta: 0.5
@@ -147,6 +154,10 @@ actor_rollout_ref:
       forward_only: true
       strategy: fsdp
       dtype: bfloat16
+      mixed_precision:
+        param_dtype: bf16
+        reduce_dtype: fp32
+        buffer_dtype: fp32
     profiler:
       _target_: verl.utils.profiler.ProfilerConfig
       tool: torch
@@ -277,6 +288,8 @@ actor_rollout_ref:
         max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
         guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
         reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
+        art_step_indices: null
+        output_resolution: ${oc.select:actor_rollout_ref.rollout.pipeline.output_resolution,1024}
         num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
         frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
         video_flow_shift: ${oc.select:actor_rollout_ref.rollout.pipeline.video_flow_shift,12.0}
@@ -309,6 +322,8 @@ actor_rollout_ref:
       max_sequence_length: 512
       guidance_scale: null
       reference_image_short_edge: null
+      art_step_indices: null
+      output_resolution: 1024
       num_frames: 1
       frame_rate: 24.0
       video_flow_shift: 12.0
@@ -390,6 +405,8 @@ actor_rollout_ref:
       max_sequence_length: ${oc.select:actor_rollout_ref.rollout.pipeline.max_sequence_length,512}
       guidance_scale: ${oc.select:actor_rollout_ref.rollout.pipeline.guidance_scale,null}
       reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
+      art_step_indices: ${oc.select:actor_rollout_ref.rollout.pipeline.art_step_indices,null}
+      output_resolution: ${oc.select:actor_rollout_ref.rollout.pipeline.output_resolution,1024}
       num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
       frame_rate: ${oc.select:actor_rollout_ref.rollout.pipeline.frame_rate,24.0}
       task: ${oc.select:actor_rollout_ref.rollout.pipeline.task,null}

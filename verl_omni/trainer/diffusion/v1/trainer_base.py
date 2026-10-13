@@ -1172,6 +1172,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         batch_dict["index"] = np.arange(len(batch_dict["raw_prompt"]))
         batch_dict["gen_batch_seq"] = np.full(len(batch_dict["raw_prompt"]), self._gen_batch_seq)
         self._gen_batch_seq += 1
+        # Generation chunks may each have index=0. Use a run-wide prompt
+        # counter for noise seeds, independent of chunking and worker routing.
+        seed_offset = getattr(self, "_rollout_seed_offset", 0)
+        count = len(batch_dict["raw_prompt"])
+        batch_dict["_rollout_seed_global_idx"] = np.arange(seed_offset, seed_offset + count)
+        self._rollout_seed_offset = seed_offset + count
         return tu.get_tensordict(batch_dict)
 
     def _generation_batch_size(self) -> int:
@@ -1601,7 +1607,14 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
             tq.kv_clear(keys=batch_meta.keys, partition_id=batch_meta.partition_id)
 
-        sample_outputs = torch.cat(sample_outputs, dim=0) if sample_outputs else torch.empty(0)
+        if self.config.actor_rollout_ref.model.algorithm == "diffusion_art" and sample_outputs:
+            from .tq_utils import _stack_field
+
+            sample_outputs = _stack_field(
+                [image for batch_images in sample_outputs for image in batch_images], pad_all_dims=True
+            )
+        else:
+            sample_outputs = torch.cat(sample_outputs, dim=0) if sample_outputs else torch.empty(0)
         self._maybe_log_val_generations(
             inputs=sample_inputs,
             outputs=sample_outputs,

@@ -796,6 +796,135 @@ class DPOLoss(DiffusionLossFn):
         return DiffusionLossResult(loss=loss, metrics=metrics)
 
 
+@register_diffusion_loss("diffusion_art")
+class DiffusionARTLoss(DiffusionLossFn):
+    """ART velocity objective with frozen rollout predictions and complete-group statistics."""
+
+    required_model_output_keys = ("current_velocity",)
+    required_data_keys = ("old_velocity", "state", "sigma", "dt", "direction", "magnitude")
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        config,
+        current_velocity,
+        old_velocity,
+        state,
+        sigma,
+        dt,
+        direction,
+        magnitude,
+        reference_prediction=None,
+    ):
+        """Compute the frozen-target velocity loss and scalar training metrics."""
+        from .art_math import art_loss
+
+        options = dict(config.diffusion_loss.get("art_loss_options", {}))
+        if "reference_mse_beta" in options or "reference_prediction" in options:
+            raise ValueError("Configure ART reference regularization with actor.use_kl_loss/kl_loss_coef.")
+        current_mean = old_mean = None
+        if options.get("mask_space", "velocity") == "ode_mean":
+            with torch.no_grad():
+                current_mean = state.float() + dt.reshape(-1, 1, 1) * current_velocity.detach().float()
+                old_mean = state.float() + dt.reshape(-1, 1, 1) * old_velocity.detach().float()
+        result = art_loss(
+            current_velocity,
+            old_velocity,
+            sigma,
+            direction,
+            magnitude,
+            state=state,
+            ode_velocity_coefficient=dt,
+            current_ode_mean=current_mean,
+            old_ode_mean=old_mean,
+            reference_prediction=reference_prediction,
+            reference_mse_beta=config.kl_loss_coef if config.use_kl_loss else 0.0,
+            **options,
+        )
+        metrics = {
+            "art_policy_loss": result["per_item_policy_loss"].detach().mean(),
+            "art_reference_mse": result["per_item_reference_mse"].detach().mean(),
+            "art_keep_fraction": result["keep_mask"].float().mean(),
+            "art_masked_fraction": result["masked"].float().mean(),
+            "art_movement_score": result["movement_score"].mean(),
+        }
+        return result["per_item_loss"].mean(), metrics
+
+    def __call__(self, *, config, model_output, data):
+        loss, metrics = self.compute_loss(
+            config=config,
+            current_velocity=model_output["current_velocity"],
+            **{key: data[key] for key in self.required_data_keys},
+            reference_prediction=data.get("reference_prediction"),
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics, add_loss_metric=True)
+
+    @staticmethod
+    def validate_trainer_config(config):
+        """Validate the supported async ART runtime before allocating workers."""
+        from .art_precision import validate_art_precision
+
+        DiffusionLossFn.validate_trainer_config(config)
+        validate_art_precision(config.actor_rollout_ref.model, config.actor_rollout_ref.actor)
+        if config.actor_rollout_ref.model.model_type != "diffusion_art_model":
+            raise ValueError("ART requires model.model_type=diffusion_art_model.")
+        if not config.trainer.get("use_v1", False) or config.algorithm.trainer_type != "direct_preference":
+            raise ValueError("ART requires the V1 direct_preference trainer.")
+        if config.trainer.v1.trainer_mode != "separate_async":
+            raise ValueError("This ART integration requires separate_async for serving-version commits.")
+        if config.trainer.v1.separate_async.hybrid_rollout.enable_switch:
+            raise ValueError("ART currently requires hybrid_rollout.enable_switch=false.")
+        if config.actor_rollout_ref.rollout.checkpoint_engine.backend == "naive":
+            raise ValueError("ART requires streaming checkpoint publication (nccl or omni_delta_sharded).")
+        if config.actor_rollout_ref.rollout.n < 2:
+            raise ValueError("ART requires rollout.n >= 2 for complete-prompt covariance.")
+        if config.algorithm.get("sample_source", "online") != "online":
+            raise ValueError("ART requires online rollout caches.")
+        if config.actor_rollout_ref.actor.use_distill_loss:
+            raise ValueError("ART does not support the policy-gradient distillation loss.")
+
+        from importlib.util import find_spec
+
+        if (
+            find_spec("vllm_omni.diffusion.models.qwen_image_21") is None
+            or find_spec("diffusers.models.transformers.transformer_qwenimage21") is None
+        ):
+            raise ImportError(
+                "Qwen-Image 2.1 ART requires native QwenImage21 support in both diffusers and vllm-omni. "
+                "The repository's pinned serving version does not include it; install compatible builds "
+                "before selecting diffusion_art."
+            )
+
+    @staticmethod
+    def prepare_actor_batch(batch, reward_tensor, config):
+        """Build actor tensors from complete, scored prompt groups."""
+        from verl_omni.pipelines.model_base import DiffusionModelBase
+
+        caches = batch.non_tensor_batch.get("art_cache")
+        uids = batch.non_tensor_batch.get("uid")
+        if caches is None or uids is None:
+            raise ValueError("ART requires art_cache and uid from rollout.")
+        if any(c is None for c in caches):
+            raise ValueError("ART rollout cache was lost during transport.")
+        expected = config.actor_rollout_ref.rollout.n
+        counts = defaultdict(int)
+        for uid in uids:
+            counts[str(uid)] += 1
+        if any(n != expected for n in counts.values()):
+            raise ValueError("ART must receive complete prompt groups before computing covariance.")
+        rewards = reward_tensor.detach().float().reshape(len(caches), -1).sum(-1)
+        options = dict(config.actor_rollout_ref.actor.diffusion_loss.get("art_covariance_options", {}))
+        packed = DiffusionModelBase.get_class(config.actor_rollout_ref.model).prepare_art_batch(
+            list(caches), rewards, list(uids), covariance_options=options
+        )
+        for key, value in packed.items():
+            batch.batch[key] = value
+        # Do not send a second, opaque copy of the full trajectory to every worker.
+        batch.non_tensor_batch.pop("art_cache")
+        return batch
+
+
 @register_diffusion_loss("diffusion_nft")
 class DiffusionNFTLoss(DiffusionLossFn):
     """DiffusionNFT forward-process direct-preference objective."""
