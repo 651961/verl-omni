@@ -175,6 +175,18 @@ class OmniRewardLoopManager(RewardLoopManager):
     def reward_loop_worker_handles(self):
         if not streaming_reward_enabled(self.config):
             return None
+        if self.multi_reward_model_manager.models:
+            if not hasattr(self, "_streaming_reward_router"):
+                from .streaming_reward import StreamingRewardRouter
+
+                native_names = {
+                    name
+                    for name, spec in self.multi_reward_model_manager.reward_model_specs.items()
+                    if spec.backend == "native"
+                }
+                router_cls = ray.remote(StreamingRewardRouter)
+                self._streaming_reward_router = router_cls.remote(self._reward_worker_groups, native_names)
+            return [self._streaming_reward_router]
         return super().reward_loop_worker_handles
 
     def _init_reward_loop_workers(self):

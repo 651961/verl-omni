@@ -342,8 +342,13 @@ def streaming_reward_enabled(config) -> bool:
     """Whether the current reward path can run inside streaming rollout workers."""
     if not reward_is_enabled(config):
         return True
-    if has_engine_reward_models(config) or has_native_reward_models(config):
-        return False
+    if has_reward_models(config):
+        # Phase-based offloading requires the batch lifecycle. Streaming is
+        # safe only with dedicated, continuously resident reward GPUs.
+        return reward_pool_is_separate(config) and all(
+            not parse_reward_model_config(name, model).resolved_offload
+            for name, model in get_reward_model_entries(config).items()
+        )
     return bool(config.reward.reward_model.get("enable_resource_pool", False))
 
 
