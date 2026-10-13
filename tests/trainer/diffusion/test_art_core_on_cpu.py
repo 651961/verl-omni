@@ -48,11 +48,6 @@ def load(name):
     source = path.read_text().replace("from verl_omni.trainer.diffusion.art_math", "from " + PACKAGE + ".art_math")
     source = source.replace("from verl_omni.trainer.diffusion.art_capture", "from " + PACKAGE + ".art_recorder")
     exec(compile(source, str(path), "exec"), module.__dict__)
-    if name == "art_data":
-        compact_path = ROOT / "verl_omni/trainer/diffusion/art_data.py"
-        namespace = {}
-        exec(compile(compact_path.read_text(), str(compact_path), "exec"), namespace)
-        module.compact_art_caches = namespace["compact_art_caches"]
     return module
 
 

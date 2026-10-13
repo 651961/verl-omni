@@ -97,7 +97,7 @@ python -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
     actor_rollout_ref.rollout.enforce_eager="${ROLLOUT_ENFORCE_EAGER:-false}" \
     actor_rollout_ref.rollout.step_execution="${ROLLOUT_STEP_EXECUTION:-true}" \
-    actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS:-4}" \
+    actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS:-1}" \
     actor_rollout_ref.rollout.calculate_log_probs=false \
     actor_rollout_ref.rollout.agent.default_agent_loop=qwen_image21_agent \
     actor_rollout_ref.rollout.n="$GROUP_SIZE" \

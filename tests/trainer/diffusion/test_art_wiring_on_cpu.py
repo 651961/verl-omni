@@ -65,7 +65,6 @@ class TU:
 def isolated_art_imports(**modules):
     # Do not replace real framework packages globally during test collection.
     aliases = {
-        "verl_omni.trainer.diffusion.art_data": data,
         "verl_omni.pipelines.model_base": types.SimpleNamespace(
             DiffusionModelBase=types.SimpleNamespace(
                 get_class=lambda config: types.SimpleNamespace(prepare_art_batch=data.pack_art_caches)

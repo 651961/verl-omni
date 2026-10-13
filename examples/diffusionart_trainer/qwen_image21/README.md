@@ -215,10 +215,12 @@ all nodes as described in the [V1 guide](../../../docs/start/diffusion_v1.md).
 - **Trajectory staging:** `enable_timestep_staging=true` transfers states from CPU one
   timestep at a time. Samples retain their own resolution/layout and use micro-batch 1.
   Transfers are synchronous; this setting does not promise copy/compute overlap.
-- **Rollout:** native step execution is enabled, with `ROLLOUT_MAX_NUM_SEQS=4` and
+- **Rollout:** native step execution is enabled, with `ROLLOUT_MAX_NUM_SEQS=1` and
   `ROLLOUT_ENFORCE_EAGER=false`. `ROLLOUT_STEP_EXECUTION=false` selects full-forward execution.
-  The integration reuses native batching and per-request prefix KV. Actor replay preserves
-  the prefill layout; step execution rejects layout changes within a trajectory.
+  Each engine runs one request at a time by default to limit memory use at 2048 resolution,
+  while separate engines can generate concurrently. The integration reuses per-request prefix KV.
+  Actor replay preserves the prefill layout; step execution rejects layout changes
+  within a trajectory.
 - **Weight synchronization:** the first publication exports BF16 weights; later publications
   send changed BF16 values relative to the published copy. Small FP32 updates remain in
   the master weights until they cross a BF16 rounding boundary. Savings depend on the
@@ -230,8 +232,9 @@ all nodes as described in the [V1 guide](../../../docs/start/diffusion_v1.md).
 TransferQueue SimpleStorage holds training data; Ray handles worker scheduling and RPC.
 After scoring, the training queue retains `uid`, rewards, `art_cache`, and small metadata.
 Images remain only when needed for configured dumps; validation retains images without
-training trajectories. Identical conditions, reference latents, and schedules are shared
-within a group. Statistics do not fetch the full trajectory cache.
+training trajectories. With single-request rollout, conditions, reference latents, and
+schedules are stored once per prompt group without comparing tensors. Batched rollout
+retains these fields per trajectory. Statistics do not fetch the full trajectory cache.
 
 `TQ_STORAGE_UNITS` defaults to actor nodes plus rollout nodes (2); `TQ_STORAGE_SIZE`
 defaults to 320 sample slots, not bytes. Increase capacity when increasing warmup or

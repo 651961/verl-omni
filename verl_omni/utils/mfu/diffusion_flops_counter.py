@@ -350,7 +350,7 @@ def collect_diffusion_flops_meta(
 
 
 def allgather_diffusion_flops_meta(meta: dict, dp_group) -> dict:
-    """All-gather per-rank latent/prompt seqlens across the DP group.
+    """All-gather per-rank FLOPs metadata in one collective across the DP group.
 
     ``num_timesteps`` and ``num_forward_passes`` are scalars constant across the
     DP group, so they are kept as-is. Mirrors the ``global_token_num`` gather
@@ -372,7 +372,9 @@ def allgather_diffusion_flops_meta(meta: dict, dp_group) -> dict:
             continue
         if not isinstance(value, list):
             raise TypeError(f"Diffusion FLOPs metadata {key!r} must be a list, got {type(value).__name__}.")
-        gathered = [None] * dp_world
-        torch.distributed.all_gather_object(gathered, value, dp_group)
-        gathered_meta[key] = [item for values in gathered for item in values]
+    gathered = [None] * dp_world
+    torch.distributed.all_gather_object(gathered, meta, dp_group)
+    for key in meta:
+        if key not in gathered_meta:
+            gathered_meta[key] = [item for rank_meta in gathered for item in rank_meta[key]]
     return gathered_meta

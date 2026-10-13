@@ -63,6 +63,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             worker = cls()
             worker.model_config = SimpleNamespace(algorithm="diffusion_art")
             worker.config = SimpleNamespace(trainer={})
+            worker.rollout_config = SimpleNamespace(max_num_seqs=1, engine_kwargs={})
             caches = [cache(seed=i) for i in range(2)]
             caches[1]["conditions"] = copy.deepcopy(caches[0]["conditions"])
             outputs = [
@@ -121,12 +122,25 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             await worker._write_trajectories_to_tq(outputs, uid="d", trajectory={"step": 2}, validate=False)
             self.assertIn("responses", tq.async_kv_batch_put.await_args.kwargs["fields"][0])
 
-    def test_compaction_preserves_different_conditions_and_rejects_incomplete_reads(self):
-        caches = [cache(seed=0), cache(seed=1)]
-        compact = data.compact_art_caches(caches)
-        self.assertIn("conditions", compact[1])
-        self.assertNotIn("timesteps", compact[1])
-        tq = SimpleNamespace(kv_batch_get=Mock(return_value={"uid": ["a"], "art_cache": [compact[1]]}))
+            # Opting into batching retains each request's own replay conditions.
+            caches[1]["conditions"] = cache(seed=1)["conditions"]
+            for max_num_seqs, engine_kwargs in (
+                (4, {}),
+                (1, {"vllm_omni": {"max_num_seqs": 4}}),
+                (1, {"vllm_omni": {"max-num-seqs": 4}}),
+            ):
+                worker.rollout_config = SimpleNamespace(max_num_seqs=max_num_seqs, engine_kwargs=engine_kwargs)
+                await worker._write_trajectories_to_tq(outputs, uid="b", trajectory={"step": 2}, validate=False)
+                rows = tq.async_kv_batch_put.await_args.kwargs["fields"]
+                for i, row in enumerate(rows):
+                    for key in ("conditions", "timesteps", "sigmas", "dt"):
+                        self.assertIs(row["art_cache"][key], caches[i][key])
+
+    def test_shared_conditions_require_complete_group_reads(self):
+        partial = cache()
+        for key in ("conditions", "timesteps", "sigmas", "dt"):
+            partial.pop(key)
+        tq = SimpleNamespace(kv_batch_get=Mock(return_value={"uid": ["a"], "art_cache": [partial]}))
         with self.assertRaisesRegex(ValueError, "complete prompt group"):
             tq_reader(tq)["diffusion_tq_batch_to_dataproto"](SimpleNamespace(keys=["a_1_0"], partition_id="train"))
 

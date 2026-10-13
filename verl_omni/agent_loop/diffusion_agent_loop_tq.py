@@ -226,11 +226,13 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         # each put stackable.
         rows: dict[tuple[str, ...], list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
         art = getattr(getattr(self, "model_config", None), "algorithm", None) == "diffusion_art"
-        compact_caches = None
+        share_art_conditions = False
         if art and not validate:
-            from verl_omni.trainer.diffusion.art_data import compact_art_caches
-
-            compact_caches = compact_art_caches([internal.extra_fields["art_cache"] for _, internal in outputs])
+            engine_kwargs = {
+                key.replace("-", "_"): value
+                for key, value in (self.rollout_config.engine_kwargs.get("vllm_omni", {}) or {}).items()
+            }
+            share_art_conditions = int(engine_kwargs.get("max_num_seqs") or self.rollout_config.max_num_seqs) == 1
         keep_art_media = art and bool(self.config.trainer.get("rollout_data_dir", None))
         for row_index, (session_id, internal) in enumerate(outputs):
             # Diffusion single-turn agent loops produce one output per session.
@@ -278,7 +280,12 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 # Keep the large trajectory separate from the lightweight
                 # envelope fetched again by metric/validation projections.
                 if not validate:
-                    field["art_cache"] = compact_caches[row_index] if compact_caches is not None else extra["art_cache"]
+                    field["art_cache"] = dict(extra["art_cache"])
+                    # Single-request rollout keeps the same condition layout for
+                    # every session of this prompt; store shared fields once.
+                    if share_art_conditions and row_index:
+                        for name in ("conditions", "timesteps", "sigmas", "dt"):
+                            field["art_cache"].pop(name)
                 # Use the serving version captured with the trajectory, rather
                 # than the trainer's version at request submission/completion.
                 step = int(extra["art_cache"]["policy_version"])
