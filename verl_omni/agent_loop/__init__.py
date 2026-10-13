@@ -18,6 +18,7 @@
 # (import cycle).
 from verl_omni.pipelines.ltx2_flow_grpo.agent_loop import LTX2DiffusionSingleTurnAgentLoop
 from verl_omni.pipelines.minimax_h3_diffusion_nft.agent_loop import MiniMaxH3DiffusionSingleTurnAgentLoop
+from verl_omni.pipelines.qwen_image21.agent_loop import QwenImage21AgentLoop
 
 from .composite_agent_loop import CompositeAgentLoopWorker
 from .diffusion_agent_loop import DiffusionAgentLoopOutput, DiffusionAgentLoopWorker
@@ -37,4 +38,5 @@ __all__ = [
     "OmniSingleTurnAgentLoop",
     "LTX2DiffusionSingleTurnAgentLoop",
     "MiniMaxH3DiffusionSingleTurnAgentLoop",
+    "QwenImage21AgentLoop",
 ]

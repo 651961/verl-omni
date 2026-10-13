@@ -1055,7 +1055,7 @@ class BaseRayDiffusionTrainer(ABC):
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
         reward_loop_worker_handles = (
-            self.reward_loop_manager.reward_loop_workers if self.enable_agent_reward_loop else None
+            self.reward_loop_manager.reward_loop_worker_handles if self.enable_agent_reward_loop else None
         )
 
         self.llm_server_manager = LLMServerManager.create(

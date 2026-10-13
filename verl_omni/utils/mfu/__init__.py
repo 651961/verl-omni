@@ -18,6 +18,7 @@ from verl_omni.utils.mfu import (  # noqa: F401 — register built-in architectu
     boogu_image,
     minimax_h3,
     qwen_image,
+    qwen_image21,
     stable_diffusion_3,
     wan,
 )
@@ -33,6 +34,7 @@ from verl_omni.utils.mfu.diffusion_flops_counter import (
 )
 from verl_omni.utils.mfu.minimax_h3 import MiniMaxH3Flops
 from verl_omni.utils.mfu.qwen_image import QwenImageFlops
+from verl_omni.utils.mfu.qwen_image21 import QwenImage21Flops
 from verl_omni.utils.mfu.stable_diffusion_3 import StableDiffusion3Flops
 from verl_omni.utils.mfu.wan import WanFlops
 
@@ -42,6 +44,7 @@ __all__ = [
     "BooguImageFlops",
     "MiniMaxH3Flops",
     "QwenImageFlops",
+    "QwenImage21Flops",
     "StableDiffusion3Flops",
     "WanFlops",
     "register_diffusion_architecture",

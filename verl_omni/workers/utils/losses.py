@@ -98,7 +98,7 @@ def diffusion_loss(config: DiffusionActorConfig, model_output, data: TensorDict,
     if loss_result.add_loss_metric:
         metrics["actor/loss"] = Metric(value=loss_value, aggregation=AggregationType.MEAN)
 
-    if config.use_kl_loss:
+    if config.use_kl_loss and loss_mode != "diffusion_art":
         loss_func = get_diffusion_loss_fn("kl")
         loss_func.validate_inputs(loss_name="kl", model_output=model_output, data=data)
         kl_result = loss_func(config=config, model_output=model_output, data=data)

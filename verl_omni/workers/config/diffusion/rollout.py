@@ -68,6 +68,11 @@ class DiffusionPipelineConfig(BaseConfig):
     guidance_scale: Optional[float] = None
     reference_image_short_edge: Optional[int] = None
 
+    # Selected ODE training steps; None captures the full ART trajectory.
+    art_step_indices: Optional[list[int]] = None
+    # Square-pixel budget for Qwen-Image 2.1 output canvases.
+    output_resolution: int = 1024
+
     # Wan2.2 video generation: number of frames (81 = ~3s at 24fps)
     num_frames: int = 1
 

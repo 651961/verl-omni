@@ -675,6 +675,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 "model_type=diffusion_dpo_model so infer_actor_batch / infer_ref_batch "
                 "emit noise_pred rather than SDE log_probs."
             )
+        if self.config.actor_rollout_ref.model.algorithm == "diffusion_art":
+            return DataProto.from_tensordict(tu.get_tensordict({"art_ref_predictions": noise_pred.float()}))
         if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
             noise_pred = noise_pred[:, 0]
         noise = tu.get(output, "noise")
@@ -828,7 +830,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         from verl.utils import hf_processor, hf_tokenizer
 
-        from verl_omni.utils.fs import resolve_model_local_dir
+        from verl_omni.utils.fs import resolve_diffusion_tokenizer_path, resolve_model_local_dir
 
         local_path = resolve_model_local_dir(
             self.config.actor_rollout_ref.model.path,
@@ -837,10 +839,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         trust_remote_code = self.config.data.get("trust_remote_code", False)
 
         if self.config.actor_rollout_ref.model.tokenizer_path is None:
-            tokenizer_path = os.path.join(local_path, "tokenizer")
-            self.config.actor_rollout_ref.model.tokenizer_path = (
-                tokenizer_path if os.path.exists(tokenizer_path) else local_path
-            )
+            self.config.actor_rollout_ref.model.tokenizer_path = resolve_diffusion_tokenizer_path(local_path)
         self.tokenizer = hf_tokenizer(
             self.config.actor_rollout_ref.model.tokenizer_path, trust_remote_code=trust_remote_code
         )
@@ -861,6 +860,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 ) from exc
 
         from verl_omni.pipelines.model_base import DiffusionModelBase
+
+        # Keep the resolved architecture available to model-specific batch preparation.
+        model_config.architecture = architecture
 
         prepared_processor_path = DiffusionModelBase.get_class_by_name(
             architecture,

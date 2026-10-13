@@ -89,10 +89,12 @@ class OmniCheckpointEngineManager(CheckpointEngineManager):
         if self.backend != "naive":
             peft_config = self._fetch_actor_lora_peft_config()
             self._lora_peft_config = peft_config
-            await self._push_lora_peft_config_to_replicas(peft_config)
-        await super().update_weights(global_steps=global_steps)
+            await self._push_lora_peft_config_to_replicas(peft_config, global_steps=global_steps)
+        return await super().update_weights(global_steps=global_steps)
 
-    async def _push_lora_peft_config_to_replicas(self, peft_config: dict | None) -> None:
+    async def _push_lora_peft_config_to_replicas(
+        self, peft_config: dict | None, global_steps: int | None = None
+    ) -> None:
         """Fetch ``peft_config`` from the actor (collective-free) and stash it
         on every standalone rollout replica's worker extension.
 
@@ -100,7 +102,10 @@ class OmniCheckpointEngineManager(CheckpointEngineManager):
         futures = [
             replica.server_handle.collective_rpc.remote(
                 "set_pending_lora_peft_config",
-                kwargs={"peft_config": peft_config},
+                kwargs={
+                    "peft_config": peft_config,
+                    **({"global_steps": global_steps} if global_steps is not None else {}),
+                },
             )
             for replica in self.replicas
             if replica.server_handle is not None

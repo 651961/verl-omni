@@ -323,7 +323,7 @@ def collect_diffusion_flops_meta(
     seqlens = flops_counter.collect_meta(data)
 
     num_timesteps = 1
-    for key in ("all_timesteps", "train_timesteps"):
+    for key in ("art_timesteps", "all_timesteps", "train_timesteps"):
         timesteps = data.get(key, None)
         if timesteps is not None and hasattr(timesteps, "shape") and timesteps.ndim >= 2:
             try:

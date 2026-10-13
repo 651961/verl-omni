@@ -13,7 +13,7 @@
 # limitations under the License.
 """Exercise full-weight reload with changed layouts and reused IPC storage."""
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import torch
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
@@ -97,6 +97,7 @@ def test_full_weight_reload_restores_layout_and_owns_cross_bucket_tensors(monkey
         _get_zmq_handle=lambda: "test-reload",
         _get_standard_weight_model_and_config=lambda: (model, SimpleNamespace(dtype=torch.float32)),
     )
+    worker._commit_art_policy_version = MethodType(vLLMOmniColocateWorkerExtension._commit_art_policy_version, worker)
     for weight_value, bias_value in ((3.0, 7.0), (5.0, 11.0)):
         vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker)
         torch.testing.assert_close(model.layer.weight, torch.full((1, 2, 2), weight_value))
@@ -163,6 +164,7 @@ def test_dense_omni_reload_preserves_auxiliary_buffers_and_post_load_hook(monkey
             ),
         ),
     )
+    worker._commit_art_policy_version = MethodType(vLLMOmniColocateWorkerExtension._commit_art_policy_version, worker)
     for step, value in enumerate((3.0, 5.0), 1):
         vLLMOmniColocateWorkerExtension.update_weights_from_ipc(worker)
         torch.testing.assert_close(model.talker.weight, torch.full((2, 2), value))
