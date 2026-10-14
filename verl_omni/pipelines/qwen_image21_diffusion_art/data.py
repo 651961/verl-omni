@@ -174,14 +174,21 @@ def trim_art_transport(batch):
         name = "art_" + prefix
         embeds = int(batch[name + "embed_count"].max())
         mask = int(batch[name + "img_mask_count"].max())
-        for suffix in ("embeds", "embed_mask"):
-            batch[name + suffix] = batch[name + suffix][:, :embeds]
+        batch[name + "embeds"] = batch[name + "embeds"][:, :embeds]
+        valid = batch[name + "embed_mask"]
+        if valid is not None:
+            valid = valid[:, :embeds]
+            if valid.device.type != "cpu":
+                raise ValueError("ART transport masks must be checked on CPU before device staging.")
+            # Do not let cross-sample transport padding disable FlashAttention.
+            # Retain real rollout padding: its positions are part of the RoPE layout.
+            batch[name + "embed_mask"] = None if valid.all() else valid
         batch[name + "img_mask"] = batch[name + "img_mask"][:, :mask]
     return batch
 
 
 def qwen21_art_inputs(batch, step):
-    """Rebuild one original joint layout, without padded tokens or rollout KV cache."""
+    """Rebuild the rollout layout, excluding transport padding and rollout KV cache."""
     if batch["art_states"].shape[0] != 1:
         raise ValueError("Qwen-Image 2.1 ART requires micro_batch_size_per_gpu=1 for ragged joint layouts.")
     n = int(batch["art_token_count"][0])
@@ -206,11 +213,12 @@ def qwen21_art_inputs(batch, step):
             inputs.append(None)
             continue
         mask_length = int(batch[name + "img_mask_count"][0])
+        valid = batch[name + "embed_mask"]
         inputs.append(
             {
                 **common,
                 "encoder_hidden_states": batch[name + "embeds"][:, :length],
-                "encoder_hidden_states_mask": batch[name + "embed_mask"][:, :length],
+                "encoder_hidden_states_mask": None if valid is None else valid[:, :length],
                 "img_mask": batch[name + "img_mask"][:, :mask_length],
             }
         )

@@ -195,6 +195,39 @@ class WiringTests(unittest.TestCase):
         self.assertIn("gradient_accumulation_steps", shared)
         self.assertNotIn("art_states", shared)
 
+    def test_transport_trimming_removes_only_all_valid_masks_before_staging(self):
+        from tensordict import TensorDict as RealTensorDict
+
+        for padded in (False, True):
+            caches = [cache(4, 0, True, i) for i in range(2)] + [cache(8, 4, True, i) for i in range(2)]
+            if padded:
+                for item in caches:
+                    for branch in ("inputs", "negative_inputs"):
+                        item["conditions"][branch]["encoder_hidden_states_mask"][:, 1] = False
+            packed = RealTensorDict(data.pack_art_caches(caches, [0.0, 1.0, 0.0, 1.0], ["a", "a", "b", "b"]), [4])
+            _, shared = engine_class()()._prepare_timestep_staging(packed, "art_timesteps")
+            shared = [key for key in shared if key in packed]
+            for row, original in enumerate(caches):
+                trimmed = data.trim_art_transport(packed[row : row + 1])
+                # Follow the engine's select/to/clone path; None must survive staging.
+                staged = trimmed.select(*shared).to("cpu").clone(recurse=False)
+                staged.update(trimmed.exclude(*shared))
+                positive, negative, _ = data.qwen21_art_inputs(staged, 0)
+                for prepared, branch, prefix in (
+                    (positive, "inputs", "art_"),
+                    (negative, "negative_inputs", "art_negative_"),
+                ):
+                    condition = original["conditions"][branch]
+                    self.assertIsInstance(packed[prefix + "embed_mask"], torch.Tensor)
+                    if padded:
+                        torch.testing.assert_close(
+                            prepared["encoder_hidden_states_mask"], condition["encoder_hidden_states_mask"]
+                        )
+                    else:
+                        self.assertIsNone(prepared["encoder_hidden_states_mask"])
+                    torch.testing.assert_close(prepared["encoder_hidden_states"], condition["encoder_hidden_states"])
+                    torch.testing.assert_close(prepared["img_mask"], condition["img_mask"])
+
     def test_tq_restores_opaque_cache_and_pads_both_canvas_axes(self):
         caches = [cache(), cache(8, seed=1)]
         raw = {

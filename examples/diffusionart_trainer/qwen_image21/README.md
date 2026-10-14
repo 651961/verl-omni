@@ -27,6 +27,8 @@ The environment must provide:
   `AutoencoderKLQwenImage21`. Turbo also requires pipeline-configured `sample_sigmas`
   ([Diffusers PR #14950](https://github.com/huggingface/diffusers/pull/14950)).
 - Transformers with `Qwen3VLProcessor` and `Qwen3VLForConditionalGeneration`.
+- `liger-kernel` for transformer RMSNorm (validated with 0.8.2; included in the `gpu` extra).
+- `quack-kernels>=0.6.5` for transformer RoPE (included in the `gpu` extra).
 - vLLM-Omni with the native `vllm_omni.diffusion.models.qwen_image_21` pipeline.
   Turbo requires loading `sample_sigmas` from `model_index.json` and forwarding them to
   both full-forward and step execution.
@@ -166,14 +168,13 @@ The Turbo script does not read `ROLLOUT_STEPS`.
 | `VAL_GROUP_SIZE` | `1` | Validation samples per prompt. |
 | `SYNC_STEPS` | `1` | Actor steps between weight publications; also divides the prompt batch into mini-batches. |
 | `CKPT_BACKEND` | `omni_delta_sharded` | Weight publication backend; use `nccl` for a full-sync comparison. |
-| `USE_REFERENCE` | `false` | Enable an additional frozen reference for velocity MSE regularization. |
-| `REFERENCE_MSE_COEF` | `0.001` | Coefficient for the optional reference loss. |
+
+Both scripts set `use_kl_loss=false`; training does not load a frozen reference model.
 
 At the defaults, one batch contains 8 × 8 = 64 trajectories. Actor micro-batches contain
 one sample per GPU. Each selected trajectory state contributes a forward/backward pass
 before the optimizer update; 8 or 28 replay steps do **not** mean 8 or 28 independent
-optimizer updates. Gradient checkpointing adds block recomputation. Optional reference
-regularization adds a reference model and one no-gradient forward per selected state.
+optimizer updates. Gradient checkpointing adds block recomputation.
 
 `ART_STEP_INDICES='[0,2,4,6]'` selects four states for either recipe. Indices must be sorted,
 unique, and within the actual schedule. Subsampling changes the training objective's
@@ -209,14 +210,30 @@ all nodes as described in the [V1 guide](../../../docs/start/diffusion_v1.md).
 - **Actor precision:** FP32 master parameters, gradient accumulation/reduction, and
   `torch.optim.AdamW` states; BF16 gathered parameters and compute. Rollout velocities
   and ODE states are retained in FP32.
+- **RMSNorm:** actor and optional reference transformers always use Liger kernels.
+  Q/K RMSNorm uses Llama casting; zero-centered text RMSNorm uses Gemma casting with
+  a weight offset of 1. LayerNorm keeps its native implementation. Checkpoint parameter
+  names and trainable parameters are preserved. Fused backward rounding can differ from
+  native Diffusers; paired rollout/actor velocity validation is still required.
+- **RoPE:** actor and optional reference workers always use Quack for Qwen21's complex
+  RoPE application. The worker-local Qwen21 helper is replaced for both native attention
+  processors; three-axis positions and FP32 frequencies are preserved. Rotations use
+  adjacent even/odd pairs and do not overwrite Q/K or incoming gradients. The CUDA
+  kernel has been validated on A800; vLLM-Omni rollout keeps its own implementation.
+- **Attention:** actor and reference use segmented PyTorch SDPA. All-valid text masks
+  are removed on CPU after trimming transport padding, allowing FlashAttention on A800.
+  Text remains causal, including text after image blocks; each image block keeps its
+  original visibility. Real padding, explicit masks and context parallelism retain the
+  native processor path. No extra attention package or configuration switch is needed.
 - **FSDP2:** forward parameter prefetch is enabled. Disable it with
   `actor_rollout_ref.actor.fsdp_config.forward_prefetch=false` if needed. Regional
   compilation and deferred gradient synchronization are disabled.
 - **Trajectory staging:** `enable_timestep_staging=true` transfers states from CPU one
   timestep at a time. Samples retain their own resolution/layout and use micro-batch 1.
   Transfers are synchronous; this setting does not promise copy/compute overlap.
-- **Rollout:** native step execution is enabled, with `ROLLOUT_MAX_NUM_SEQS=1` and
-  `ROLLOUT_ENFORCE_EAGER=false`. `ROLLOUT_STEP_EXECUTION=false` selects full-forward execution.
+- **Rollout:** both scripts fix `max_num_seqs=1` and `step_execution=true`, and use the
+  default `enforce_eager=false`. This allows compilation and eligible CUDA graph replay,
+  with the engine scheduling individual denoising steps.
   Each engine runs one request at a time by default to limit memory use at 2048 resolution,
   while separate engines can generate concurrently. The integration reuses per-request prefix KV.
   Actor replay preserves the prefill layout; step execution rejects layout changes
@@ -244,7 +261,7 @@ These estimates exclude endpoints, conditions, queue overhead, and temporary cop
 
 ## Logging and validation
 
-Logging defaults to `console`, project `diffusion_art`. Checkpoints and validation run
+Logging defaults to `console` and `tensorboard`, project `diffusion_art`. Checkpoints and validation run
 every 100 trainer steps; validation before training is disabled. Override `trainer.logger`,
 `trainer.project_name`, and `trainer.experiment_name` as needed. See the
 [metrics guide](../../../docs/start/metrics.md). ART MFU excludes reward computation,

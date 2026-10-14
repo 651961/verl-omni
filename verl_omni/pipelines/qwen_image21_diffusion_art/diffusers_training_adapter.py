@@ -34,6 +34,15 @@ class QwenImage21DiffusionART(DiffusionModelBase):
         return False
 
     @classmethod
+    def configure_trainable_params(cls, module, model_config):
+        """Install Qwen21 kernels before FSDP and optimizer construction."""
+        from verl_omni.pipelines.qwen_image21.ops import apply_flash_attention, apply_liger_rms_norms, apply_quack_rope
+
+        apply_liger_rms_norms(module)
+        apply_quack_rope()
+        apply_flash_attention(module)
+
+    @classmethod
     def build_scheduler(cls, model_config):
         """Load the checkpoint scheduler for engine initialization."""
         return FlowMatchEulerDiscreteScheduler.from_pretrained(model_config.local_path, subfolder="scheduler")

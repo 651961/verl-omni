@@ -41,8 +41,6 @@ TQ_STORAGE_UNITS=${TQ_STORAGE_UNITS:-$((ACTOR_NNODES + ROLLOUT_NNODES))}
 TQ_STORAGE_SIZE=${TQ_STORAGE_SIZE:-$((4 * PROMPTS_PER_BATCH * (GROUP_SIZE + 1) + 2 * VAL_PROMPTS_PER_BATCH * (VAL_GROUP_SIZE + 1)))}
 SYNC_STEPS=${SYNC_STEPS:-1}
 CKPT_BACKEND=${CKPT_BACKEND:-omni_delta_sharded}
-# Official ART needs no frozen reference model; USE_REFERENCE=true opts into
-# additional actor/reference velocity MSE regularization.
 if (( SYNC_STEPS < 1 || PROMPTS_PER_BATCH < 1 || GROUP_SIZE < 2 || VAL_PROMPTS_PER_BATCH < 1 || VAL_GROUP_SIZE < 1 || TQ_STORAGE_UNITS < 1 || TQ_STORAGE_SIZE < TQ_STORAGE_UNITS )); then
     echo "Batch, sync, validation and storage sizes must be positive; GROUP_SIZE must be >=2." >&2
     exit 1
@@ -85,8 +83,8 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=1 \
     actor_rollout_ref.actor.enable_timestep_staging=true \
     actor_rollout_ref.actor.use_no_sync_for_gradient_accumulation=false \
-    actor_rollout_ref.actor.use_kl_loss="${USE_REFERENCE:-false}" \
-    actor_rollout_ref.actor.kl_loss_coef="${REFERENCE_MSE_COEF:-0.001}" \
+    actor_rollout_ref.actor.use_kl_loss=false \
+    actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.ref.strategy=fsdp2 \
     actor_rollout_ref.ref.fsdp_config.fsdp_size=8 \
     actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=1 \
@@ -97,9 +95,8 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.dtype=bfloat16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.rollout_attn_backend=TORCH_SDPA \
-    actor_rollout_ref.rollout.enforce_eager="${ROLLOUT_ENFORCE_EAGER:-false}" \
-    actor_rollout_ref.rollout.step_execution="${ROLLOUT_STEP_EXECUTION:-true}" \
-    actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS:-1}" \
+    actor_rollout_ref.rollout.step_execution=true \
+    actor_rollout_ref.rollout.max_num_seqs=1 \
     actor_rollout_ref.rollout.calculate_log_probs=false \
     actor_rollout_ref.rollout.agent.default_agent_loop=qwen_image21_agent \
     actor_rollout_ref.rollout.n="$GROUP_SIZE" \
@@ -138,7 +135,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.v1.sampler.max_off_policy_strategy=drop \
     trainer.n_gpus_per_node="$ACTOR_GPUS_PER_NODE" \
     trainer.nnodes="$ACTOR_NNODES" \
-    trainer.logger='[console]' \
+    trainer.logger='[console,tensorboard]' \
     trainer.project_name=diffusion_art \
     trainer.experiment_name=qwen_image21_turbo_async \
     trainer.val_before_train=false \
