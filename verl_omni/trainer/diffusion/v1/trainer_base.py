@@ -76,6 +76,7 @@ from verl_omni.trainer.diffusion.diffusion_metric_utils import (
 )
 from verl_omni.trainer.diffusion.diffusion_trainer_utils import (
     old_policy_decay,
+    skip_old_log_prob,
     track_nonfinite_grad_streak,
     validate_distillation_config,
 )
@@ -204,6 +205,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         self.use_teacher_policy = is_distillation_enabled(config.get("distillation"))
         self.distillation_config = omega_conf_to_dataclass(config.distillation) if self.use_teacher_policy else None
         validate_distillation_config(config)
+        self.skip_old_log_prob = skip_old_log_prob(config)
+        if self.skip_old_log_prob:
+            logger.info("The actor loss reads no log-probs; skipping the old_log_prob stage.")
         self._teacher_one_step_off = self.use_teacher_policy and self.distillation_config.scheduler == "one_step_off"
         self._pending_teacher_batch = None
         self.replay_buffer = self._build_replay_buffer()
@@ -576,12 +580,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         bypass_recomputing_logprobs = bool(rollout_corr_config and rollout_corr_config.get("bypass_mode", False))
         if bypass_recomputing_logprobs:
             apply_bypass_mode_to_diffusion_batch(data)
-        else:
+        elif not self.skip_old_log_prob:
             with marked_timer("old_log_prob", timing_raw, color="blue"):
                 old_log_prob = self._compute_old_log_prob(data)
                 data = data.union(old_log_prob)
-
-        assert "old_log_probs" in data.batch, f'"old_log_probs" not in {data.batch.keys()}'
+            assert "old_log_probs" in data.batch, f'"old_log_probs" not in {data.batch.keys()}'
 
         metrics.update(
             compute_rollout_corr_metrics_from_batch(
@@ -1450,7 +1453,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         if reward_extra_infos_dict:
             data.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
-        num_timesteps = data.batch["old_log_probs"].shape[1]
+        num_timesteps = data.batch["all_timesteps"].shape[1]
         data.batch["sample_level_rewards"] = data.batch["sample_level_scores"].expand(-1, num_timesteps)
 
         norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)
