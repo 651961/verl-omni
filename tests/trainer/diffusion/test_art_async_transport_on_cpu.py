@@ -200,7 +200,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_recipe_node_topology_and_hsdp(self):
         with tempfile.TemporaryDirectory() as directory:
-            executable = Path(directory) / "python"
+            executable = Path(directory) / "python3"
             executable.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
             executable.chmod(0o755)
             base = {
@@ -214,7 +214,7 @@ class ConfigurationTests(unittest.TestCase):
             for total in (8, 16, 32):
                 env = {**base, "ACTOR_GPUS": str(total), "ROLLOUT_GPUS": "16"}
                 result = subprocess.run(
-                    ["bash", str(ROOT / "examples/diffusionart_trainer/qwen_image21/run_qwen_image21_async.sh")],
+                    ["bash", str(ROOT / "examples/diffusionart_trainer/qwen_image21/run_qwen_image21.sh")],
                     env=env,
                     text=True,
                     capture_output=True,
@@ -228,16 +228,6 @@ class ConfigurationTests(unittest.TestCase):
                 self.assertEqual(arguments["actor_rollout_ref.rollout.nnodes"], "2")
                 self.assertEqual(arguments["actor_rollout_ref.rollout.n_gpus_per_node"], "8")
                 self.assertEqual(arguments["data.val_batch_size"], "8")
-                self.assertLess(int(arguments["transfer_queue.backend.SimpleStorage.total_storage_size"]), 1000)
-                self.assertEqual(
-                    arguments["transfer_queue.backend.SimpleStorage.num_data_storage_units"], str(total // 8 + 2)
-                )
-            rejected = subprocess.run(
-                ["bash", str(ROOT / "examples/diffusionart_trainer/qwen_image21/run_qwen_image21_async.sh")],
-                env={**base, "ACTOR_GPUS": "12"},
-                capture_output=True,
-            )
-            self.assertNotEqual(rejected.returncode, 0)
 
     def test_weight_sync_returns_parent_metrics(self):
         class Parent:

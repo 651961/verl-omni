@@ -40,7 +40,8 @@ for this recipe uses Diffusers `0.41.0`, Transformers `5.14.1`, vLLM `0.31.0`, a
 vLLM-Omni `0.31.0rc2.dev145+gdb9278431`. Model imports and the Turbo scheduler were checked
 on CPU; this is not an end-to-end GPU compatibility result.
 
-By default, reserve **8 actor GPUs and 2 separate rollout GPUs**, plus any resources
+By default, Turbo reserves **8 actor GPUs and 8 separate rollout GPUs**; the standard
+recipe reserves **8 actor GPUs and 2 separate rollout GPUs**. Allow additional resources
 needed by your reward function. Actor nodes use 8 GPUs each (`fsdp_size=8`, SP=1):
 single-node FSDP2 becomes HSDP across multiple nodes. Rollout uses TP=SP=CFG-parallel=1,
 so each rollout GPU must fit the native pipeline and its working memory.
@@ -77,8 +78,8 @@ the recipes' `true_cfg_scale=1.0`.
 
 ### Resolution and RGBA
 
-Set `OUTPUT_RESOLUTION=2048` for an output area around 2048 × 2048 pixels. The script
-default is **1024**, so set this explicitly for 2048-resolution runs. Without explicit
+Set `OUTPUT_RESOLUTION=2048` for an output area around 2048 × 2048 pixels. Both scripts
+default to **2048**. Without explicit
 width/height, text-to-image uses a square canvas; editing follows the last reference
 image's aspect ratio.
 
@@ -111,8 +112,7 @@ calls a separate GPU service, provision that service independently. For named lo
 
 ## Run training
 
-Launch from the repository root. Both scripts change to that directory, so relative
-data and reward paths are resolved from the repository root.
+Launch from the repository root so relative data and reward paths resolve correctly.
 
 Set the common inputs once, replacing the example paths with your dataset and scorer:
 
@@ -128,14 +128,14 @@ export OUTPUT_RESOLUTION=2048
 
 ```bash
 ART_MODEL_PATH=/models/Qwen-Image-2.1 \
-bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_async.sh
+bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21.sh
 ```
 
 ### Qwen-Image 2.1 Turbo
 
 ```bash
 ART_MODEL_PATH=/models/Qwen-Image-2.1-Turbo \
-bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_turbo_async.sh
+bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_turbo.sh
 ```
 
 Both are standalone scripts with complete trainer configurations. The standard recipe
@@ -143,8 +143,8 @@ requires `ART_MODEL_PATH`; Turbo defaults to `/models/Qwen-Image-2.1-Turbo` when
 
 | Setting | Qwen-Image 2.1 | Qwen-Image 2.1 Turbo |
 | --- | --- | --- |
-| Launcher | [`run_qwen_image21_async.sh`](run_qwen_image21_async.sh) | [`run_qwen_image21_turbo_async.sh`](run_qwen_image21_turbo_async.sh) |
-| Training/validation denoising steps | 28, configurable through `ROLLOUT_STEPS` | 8, using the checkpoint's saved sigma schedule |
+| Launcher | [`run_qwen_image21.sh`](run_qwen_image21.sh) | [`run_qwen_image21_turbo.sh`](run_qwen_image21_turbo.sh) |
+| Training/validation denoising steps | Training: 28, configurable through `ROLLOUT_STEPS`; validation: 40 | 8, using the checkpoint's saved sigma schedule |
 | ART replay steps | All 28 by default | All 8 by default |
 | CFG scale | 1.0 | 1.0 |
 | Experiment name | `qwen_image21_async` | `qwen_image21_turbo_async` |
@@ -161,13 +161,15 @@ The Turbo script does not read `ROLLOUT_STEPS`.
 | `TRAIN_STEPS` | `1000` | Trainer step limit, independent of denoising steps. |
 | `PROMPTS_PER_BATCH` | `8` | Prompts per training batch. |
 | `GROUP_SIZE` | `8` | Generated samples per prompt; must be at least 2. |
-| `ART_LR` | `1e-6` | AdamW learning rate. |
+| `ART_LR` | `1e-5` | AdamW learning rate. |
 | `ART_STEP_INDICES` | `null` | Zero-based rollout states to replay; `null` selects all. |
-| `OUTPUT_RESOLUTION` | `1024` | Default output area is approximately this value squared. |
-| `VAL_PROMPTS_PER_BATCH` | `PROMPTS_PER_BATCH` | Validation prompt count. |
-| `VAL_GROUP_SIZE` | `1` | Validation samples per prompt. |
+| `OUTPUT_RESOLUTION` | `2048` | Default output area is approximately this value squared. |
 | `SYNC_STEPS` | `1` | Actor steps between weight publications; also divides the prompt batch into mini-batches. |
 | `CKPT_BACKEND` | `omni_delta_sharded` | Weight publication backend; use `nccl` for a full-sync comparison. |
+
+Validation uses the same prompt batch size as training and generates one image per prompt.
+The rollout engine processes one request at a time per GPU (`max_num_seqs=1`) during both
+training-data generation and validation; the prompt batch size applies across the rollout pool.
 
 Both scripts set `use_kl_loss=false`; training does not load a frozen reference model.
 
@@ -183,7 +185,7 @@ sampling; it is not a lossless performance optimization.
 CLI Hydra overrides take precedence. For example:
 
 ```bash
-TRAIN_STEPS=100 bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_turbo_async.sh \
+TRAIN_STEPS=100 bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_turbo.sh \
     trainer.test_freq=20 \
     trainer.save_freq=20
 ```
@@ -195,7 +197,7 @@ nodes and one rollout node (24 GPUs, excluding rewards):
 
 ```bash
 ACTOR_GPUS=16 ROLLOUT_GPUS=8 \
-bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_turbo_async.sh
+bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_turbo.sh
 ```
 
 `ACTOR_NNODES` can also specify the actor node count; `ACTOR_GPUS_PER_NODE` must remain 8.
@@ -253,9 +255,10 @@ training trajectories. With single-request rollout, conditions, reference latent
 schedules are stored once per prompt group without comparing tensors. Batched rollout
 retains these fields per trajectory. Statistics do not fetch the full trajectory cache.
 
-`TQ_STORAGE_UNITS` defaults to actor nodes plus rollout nodes (2); `TQ_STORAGE_SIZE`
-defaults to 320 sample slots, not bytes. Increase capacity when increasing warmup or
-in-flight batches. State/velocity buffers alone require about 56 MiB per 1024², 28-step
+TransferQueue uses the framework defaults: 8 storage units and a total capacity of
+100000 sample slots. Consumed data is explicitly cleared by the trainer; reaching
+capacity does not automatically evict old data. State/velocity buffers alone require
+about 56 MiB per 1024², 28-step
 trajectory, or 224 MiB at 2048². At 2048² and 8 steps, they require about 64 MiB.
 These estimates exclude endpoints, conditions, queue overhead, and temporary copies.
 
@@ -271,8 +274,8 @@ With the data/reward environment variables above, inspect either recipe without 
 
 ```bash
 ART_MODEL_PATH=/models/Qwen-Image-2.1 \
-bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_async.sh --cfg job --resolve
-bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_turbo_async.sh --cfg job --resolve
+bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21.sh --cfg job --resolve
+bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_turbo.sh --cfg job --resolve
 ```
 
 Core CPU checks (run each command in its own process):
@@ -287,7 +290,7 @@ python -m unittest discover -s tests/reward_loop -p 'test_streaming_reward_route
 A short GPU run uses the same actor/rollout resource requirements:
 
 ```bash
-TRAIN_STEPS=2 bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_turbo_async.sh \
+TRAIN_STEPS=2 bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_turbo.sh \
     trainer.test_freq=-1 trainer.save_freq=-1
 # Standard-model one-step smoke:
 ART_MODEL_PATH=/models/Qwen-Image-2.1 bash tests/gpu_smoke/run_qwen_image21_diffusion_art.sh
