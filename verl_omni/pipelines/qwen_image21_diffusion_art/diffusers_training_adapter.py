@@ -14,6 +14,9 @@
 
 """Native Qwen-Image 2.1 replay of ART's frozen rollout states."""
 
+import json
+from pathlib import Path
+
 from diffusers import FlowMatchEulerDiscreteScheduler
 
 from verl_omni.pipelines.model_base import DiffusionModelBase
@@ -25,6 +28,22 @@ __all__ = ["QwenImage21DiffusionART"]
 @DiffusionModelBase.register("QwenImage21Pipeline", algorithm="diffusion_art")
 class QwenImage21DiffusionART(DiffusionModelBase):
     """Replay native Qwen-Image 2.1 conditions at frozen ART states."""
+
+    @classmethod
+    def prepare_processor_files(cls, model_path: str) -> str:
+        """Add the VLM config expected by ``AutoProcessor``.
+
+        Qwen-Image checkpoints ship the processor metadata but omit the
+        ``processor/config.json`` model-type marker that verl uses when it
+        attaches the Qwen3-VL rotary-position helper.
+        """
+        processor_dir = Path(model_path) / "processor"
+        if not processor_dir.is_dir():
+            raise FileNotFoundError(f"Qwen-Image 2.1 processor directory not found: {processor_dir}")
+        config_path = processor_dir / "config.json"
+        if not config_path.is_file():
+            config_path.write_text(json.dumps({"model_type": "qwen3_vl"}), encoding="utf-8")
+        return str(processor_dir)
 
     @classmethod
     def preserve_fp32_modules(cls):

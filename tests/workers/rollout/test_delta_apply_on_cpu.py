@@ -26,6 +26,7 @@ extension and verl's delta loader into a toy rollout model whose
 ZMQ/NCCL transport is faked.
 """
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -195,7 +196,7 @@ def _as_worker(**attrs):
     """A namespace standing in for ``self``: the delta helpers are bound onto it so
     the unbound ``update_weights_from_ipc(worker, ...)`` call style works."""
     worker = SimpleNamespace(**attrs)
-    for name in ("_apply_delta_bucket", "_finish_delta_stream"):
+    for name in ("_apply_delta_bucket", "_finish_delta_stream", "_commit_art_policy_version"):
         setattr(worker, name, vLLMOmniColocateWorkerExtension.__dict__[name].__get__(worker))
     return worker
 
@@ -486,7 +487,65 @@ def _flattened_pairs(flushes):
 
 
 def _assert_flattened(got, expected):
-    assert [(name, tensor.tolist()) for name, tensor in got] == [(name, tensor.tolist()) for name, tensor in expected]
+    assert [name for name, _ in got] == [name for name, _ in expected]
+    for (name, tensor), (_, reference) in zip(got, expected, strict=True):
+        if name.startswith(SPEC_NAME):
+            assert json.loads(bytes(tensor.tolist())) == json.loads(bytes(reference.tolist()))
+        else:
+            torch.testing.assert_close(tensor, reference, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("bucket_bytes", [1024, 4096])
+def test_delta_stream_through_real_bucket_sender(monkeypatch, dtype, bucket_bytes):
+    from verl_omni.workers.checkpoint_engine import _flatten_flush_stream
+    from verl_omni.workers.rollout.vllm_rollout.delta_apply import DeltaFlushReceiver
+
+    expected = torch.tensor([1.0, 2.0, 3.0], dtype=dtype)
+    target = _ToyRolloutModel({"weight": torch.zeros_like(expected)})
+    receiver = DeltaFlushReceiver(target)
+    dense = _encode_dense_flush([("weight", expected)])
+    # Reproduce an odd JSON byte count immediately before floating-point values.
+    spec = dense[0][1]
+    if spec.numel() % 2 == 0:
+        dense[0] = (SPEC_NAME, torch.cat((spec, spec.new_tensor([ord(" ")]))))
+    changed = expected.clone()
+    changed[1] = 7
+    delta = _encode_indices_flush(
+        [
+            (
+                [("weight", (3,))],
+                str(dtype).removeprefix("torch."),
+                torch.tensor([1]),
+                torch.tensor([1]),
+                changed[1:2],
+                None,
+            )
+        ]
+    )
+    sender = bucketed_weight_transfer.BucketedWeightSender("ipc:///tmp/test-delta-alignment.sock")
+    sender.bucket_size = bucket_bytes
+
+    def consume(message):
+        weights = []
+        for name, meta in message["bucket_meta"].items():
+            count = torch.Size(meta["shape"]).numel() * torch.empty((), dtype=meta["dtype"]).element_size()
+            tensor = sender.buffer[meta["offset"] : meta["offset"] + count].view(meta["dtype"])
+            weights.append((name, tensor.view(meta["shape"])))
+        receiver.on_bucket(weights, is_last=message["is_last"])
+
+    sender.socket = SimpleNamespace(send_pyobj=consume, recv=lambda: None)
+    sender.buffer = torch.empty(bucket_bytes, dtype=torch.uint8)
+    monkeypatch.setattr(sender, "_init_socket", lambda: None)
+    monkeypatch.setattr(sender, "_init_buffer", lambda: None)
+    monkeypatch.setattr(sender, "_cleanup", lambda: None)
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: SimpleNamespace(synchronize=lambda: None))
+    # Multiple seed flushes force bucket rollover and retain dtype alignment even
+    # when a values tensor's byte count is not a multiple of eight.
+    flushes = [(dense, False)] * 3 + [(delta, True)]
+    asyncio.run(sender.async_send_weights(_flatten_flush_stream(flushes)))
+    torch.testing.assert_close(target.state["weight"], changed, rtol=0, atol=0)
+    assert receiver.applied_flushes == 4
 
 
 def test_omni_delta_sharded_registers_flattening_engine(monkeypatch):
@@ -501,8 +560,15 @@ def test_omni_delta_sharded_registers_flattening_engine(monkeypatch):
     from verl_omni.workers.checkpoint_engine import _flatten_flush_stream
 
     flushes = [
-        ([(SPEC_NAME, torch.zeros(1)), (VALUES_NAME, torch.zeros(1))], True),
-        ([(SPEC_NAME, torch.zeros(1)), (POSITIONS_NAME, torch.zeros(1)), (VALUES_NAME, torch.zeros(1))], True),
+        ([(SPEC_NAME, _spec_tensor({"encoding": "dense"})), (VALUES_NAME, torch.zeros(1))], True),
+        (
+            [
+                (SPEC_NAME, _spec_tensor({"encoding": "indices"})),
+                (POSITIONS_NAME, torch.zeros(1)),
+                (VALUES_NAME, torch.zeros(1)),
+            ],
+            True,
+        ),
     ]
     expected = _flattened_pairs(flushes)
     # Always executed, including the CPU path where the parent engine is None.

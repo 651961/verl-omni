@@ -77,6 +77,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.rollout.nnodes="$ROLLOUT_NNODES" \
     actor_rollout_ref.rollout.n_gpus_per_node="$ROLLOUT_GPUS_PER_NODE" \
     actor_rollout_ref.rollout.load_format=safetensors \
+    actor_rollout_ref.rollout.vae_use_tiling=true \
     actor_rollout_ref.rollout.pipeline.height=0 \
     actor_rollout_ref.rollout.pipeline.width=0 \
     actor_rollout_ref.rollout.pipeline.output_resolution="$OUTPUT_RESOLUTION" \

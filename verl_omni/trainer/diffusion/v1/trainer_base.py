@@ -862,7 +862,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         from verl_omni.pipelines.model_base import DiffusionModelBase
 
         # Keep the resolved architecture available to model-specific batch preparation.
-        model_config.architecture = architecture
+        with open_dict(model_config):
+            model_config.architecture = architecture
 
         prepared_processor_path = DiffusionModelBase.get_class_by_name(
             architecture,

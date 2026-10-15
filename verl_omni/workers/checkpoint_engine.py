@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ray
+import torch
 from verl.checkpoint_engine import CheckpointEngineManager, CheckpointEngineRegistry
 from verl.utils.ray_utils import auto_await
 
@@ -72,6 +73,12 @@ def _flatten_flush_stream(flushes):
     """
     for flush_idx, (named, _is_last) in enumerate(flushes):
         for name, tensor in named:
+            if name == "__delta_spec__" and tensor.numel() % 8:
+                # The bucketed sender packs bytes without inserting dtype alignment.
+                # JSON whitespace keeps subsequent BF16/FP32 values aligned; indices
+                # already occupy multiples of four bytes, and values use one rollout dtype.
+                padding = tensor.new_full((8 - tensor.numel() % 8,), ord(" "))
+                tensor = torch.cat((tensor, padding))
             yield f"{name}#{flush_idx}", tensor
 
 

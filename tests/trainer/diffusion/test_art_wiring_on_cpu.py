@@ -359,20 +359,19 @@ class WiringTests(unittest.TestCase):
         import tempfile
         from unittest.mock import patch
 
-        class Config(dict):
-            __getattr__ = dict.__getitem__
-            __setattr__ = dict.__setitem__
+        from omegaconf import OmegaConf, open_dict
 
         namespace = extract(
             "verl_omni/trainer/diffusion/v1/trainer_base.py",
             ["PolicyGradientDiffusionTrainerV1"],
-            {"os": os},
+            {"os": os, "open_dict": open_dict},
             class_methods={"_init_tokenizer"},
         )
         worker = namespace["PolicyGradientDiffusionTrainerV1"]()
         with tempfile.TemporaryDirectory() as path:
             Path(path, "model_index.json").write_text(json.dumps({"_class_name": "QwenImage21Pipeline"}))
-            model = Config(path=path, tokenizer_path=None, architecture=None, algorithm="diffusion_art")
+            model = OmegaConf.create(dict(path=path, tokenizer_path=None, algorithm="diffusion_art"))
+            OmegaConf.set_struct(model, True)
             worker.config = types.SimpleNamespace(actor_rollout_ref=types.SimpleNamespace(model=model), data={})
             registry = Mock(return_value=types.SimpleNamespace(prepare_processor_files=lambda local: None))
             aliases = {
@@ -389,6 +388,7 @@ class WiringTests(unittest.TestCase):
             with patch.dict(sys.modules, aliases):
                 worker._init_tokenizer()
             self.assertEqual(model.architecture, "QwenImage21Pipeline")
+            self.assertTrue(OmegaConf.is_struct(model))
             registry.assert_called_once_with("QwenImage21Pipeline", "diffusion_art", None)
 
     def test_registered_loss_uses_complete_groups_and_optional_reference(self):
