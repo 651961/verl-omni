@@ -15,11 +15,13 @@
 """CUDA numerical and checkpoint-recomputation tests for Qwen21 training kernels."""
 
 import copy
+from functools import partial
 
 import pytest
 import torch
 from test_qwen_image21_liger_on_cpu import configure_adapter, norms, qwen, tiny_model
 from torch.utils._python_dispatch import TorchDispatchMode
+from torch.utils.checkpoint import checkpoint, create_selective_checkpoint_contexts
 
 from verl_omni.utils.diffusion_checkpoint import enable_gradient_checkpointing
 
@@ -155,7 +157,8 @@ def test_quack_rope_forward_backward_with_text_and_multiple_images(dtype, stride
         torch.testing.assert_close(result, reference, rtol=0, atol=0)
 
 
-def test_segmented_attention_uses_flash_forward_and_backward():
+@pytest.mark.parametrize("selective_checkpoint", [False, True])
+def test_segmented_attention_uses_flash_forward_and_backward(selective_checkpoint):
     torch.manual_seed(93)
     native = qwen.QwenImage21Attention(dim=256, heads=2, dim_head=128).to(device="cuda", dtype=torch.bfloat16)
     candidate = copy.deepcopy(native)
@@ -168,8 +171,24 @@ def test_segmented_attention_uses_flash_forward_and_backward():
     dy = torch.randn_like(expected)
     expected.backward(dy)
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
-        actual = candidate(actual_x, segments=segments)
-        actual.backward(dy)
+        with _CountFlashAttention() as attention:
+            if selective_checkpoint:
+                actual = checkpoint(
+                    candidate,
+                    actual_x,
+                    segments=segments,
+                    use_reentrant=False,
+                    context_fn=partial(
+                        create_selective_checkpoint_contexts,
+                        [torch.ops.aten._scaled_dot_product_flash_attention.default],
+                    ),
+                )
+            else:
+                actual = candidate(actual_x, segments=segments)
+            forward_calls = attention.calls
+            actual.backward(dy)
+        assert forward_calls == len(segments) + 1
+        assert attention.calls == forward_calls
     events = {event.key for event in profile.key_averages()}
     assert "aten::_scaled_dot_product_flash_attention" in events
     assert "aten::_scaled_dot_product_flash_attention_backward" in events

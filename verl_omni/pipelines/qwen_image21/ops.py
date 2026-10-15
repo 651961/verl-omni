@@ -28,6 +28,7 @@ from liger_kernel.ops.rms_norm import LigerRMSNormFunction
 from quack.rotary import apply_rotary_emb
 from torch import nn
 from torch.nn.attention.bias import causal_lower_right
+from torch.utils._python_dispatch import _disable_current_modes
 
 
 class QwenImage21FlashAttnProcessor(QwenImage21AttnProcessor):
@@ -70,9 +71,13 @@ class QwenImage21FlashAttnProcessor(QwenImage21AttnProcessor):
             outputs = []
             for start, end, is_text in segments:
                 # Text after an image sees every preceding key plus its own
-                # causal prefix. Rectangular SDPA is_causal=True is upper-left
-                # aligned, so that case needs a lower-right causal bias.
-                bias = causal_lower_right(end - start, end) if is_text and start else None
+                # causal prefix. Construct CausalBias outside SAC dispatch
+                # modes; its Tensor subclass cannot be created under them.
+                if is_text and start:
+                    with _disable_current_modes():
+                        bias = causal_lower_right(end - start, end)
+                else:
+                    bias = None
                 outputs.append(
                     F.scaled_dot_product_attention(
                         query[:, :, start:end],

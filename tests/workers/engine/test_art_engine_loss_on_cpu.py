@@ -21,6 +21,7 @@ from unittest.mock import patch
 import torch
 from verl.utils import tensordict_utils as tu
 
+from verl_omni.pipelines.qwen_image21_diffusion_art.diffusers_training_adapter import QwenImage21DiffusionART
 from verl_omni.trainer.diffusion.art_math import art_loss
 from verl_omni.workers.config.diffusion.actor import DiffusionActorConfig, DiffusionLossConfig
 from verl_omni.workers.engine.fsdp.diffusers_impl import ARTDiffusersFSDPEngine
@@ -52,7 +53,10 @@ def test_art_engine_uses_real_tensordict_metadata_and_normalizes_gradients():
     engine._run_forward_backward_batch = run_steps
     engine.model_config = None
     engine.module = None
-    adapter = SimpleNamespace(forward_art_velocity=lambda *args: (prediction, state))
+    adapter = SimpleNamespace(
+        forward_art_velocity=lambda *args: (prediction, state),
+        art_loss_coefficients=QwenImage21DiffusionART.art_loss_coefficients,
+    )
     with patch("verl_omni.pipelines.model_base.DiffusionModelBase.get_class", return_value=adapter):
         with torch.no_grad():
             loss, _ = engine.forward_backward_batch(batch, partial(diffusion_loss, config))

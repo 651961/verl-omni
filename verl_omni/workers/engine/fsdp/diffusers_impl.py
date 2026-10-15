@@ -364,7 +364,12 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             param_dtype,
             preserve_fp32_modules=preserve_fp32_modules,
         )
-        mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
+        mixed_precision = MixedPrecision(
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+            buffer_dtype=buffer_dtype,
+            cast_root_forward_inputs=model_cls.cast_forward_inputs(),
+        )
 
         auto_wrap_policy = get_fsdp_wrap_policy(
             module=module,
@@ -409,7 +414,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             # - ref: CPUOffloadPolicy(pin_memory=True)
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
             mp_policy = MixedPrecisionPolicy(
-                param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
+                param_dtype=param_dtype,
+                reduce_dtype=reduce_dtype,
+                cast_forward_inputs=model_cls.cast_forward_inputs(),
             )
             offload_policy = None
             if self.engine_config.offload_policy or self.engine_config.forward_only:

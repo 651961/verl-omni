@@ -15,10 +15,12 @@
 """Check segmented visibility against an independent dense attention oracle."""
 
 import copy
+from functools import partial
 
 import pytest
 import torch
 from test_qwen_image21_liger_on_cpu import norms, qwen
+from torch.utils.checkpoint import checkpoint, create_selective_checkpoint_contexts
 
 
 def dense_attention(attn, x, segments, key_valid):
@@ -53,7 +55,8 @@ def dense_attention(attn, x, segments, key_valid):
     ],
 )
 @pytest.mark.parametrize("padded", [False, True])
-def test_segmented_forward_backward_matches_dense_block_causal_attention(segments, padded):
+@pytest.mark.parametrize("selective_checkpoint", [False, True])
+def test_segmented_forward_backward_matches_dense_block_causal_attention(segments, padded, selective_checkpoint):
     torch.manual_seed(92)
     reference = qwen.QwenImage21Attention(dim=16, heads=2, dim_head=8)
     candidate = copy.deepcopy(reference)
@@ -64,7 +67,17 @@ def test_segmented_forward_backward_matches_dense_block_causal_attention(segment
     if padded:
         valid[:, [1, 8]] = False
     expected = dense_attention(reference, x, segments, valid)
-    actual = candidate(actual_x, segments=segments, key_valid=valid)
+    if selective_checkpoint:
+        actual = checkpoint(
+            candidate,
+            actual_x,
+            segments=segments,
+            key_valid=valid,
+            use_reentrant=False,
+            context_fn=partial(create_selective_checkpoint_contexts, [torch.ops.aten.mm.default]),
+        )
+    else:
+        actual = candidate(actual_x, segments=segments, key_valid=valid)
     torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
     dy = torch.randn_like(expected)
     expected.backward(dy)

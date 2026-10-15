@@ -96,40 +96,6 @@ class QwenImage21DiffusionARTPipeline(QwenImage21TokenIdPromptMixin, QwenImage21
             }
         return state
 
-    def _denoise_step_homogeneous(self, input_batch):
-        states = list(input_batch.states)
-        lengths = [self._resolve_prompt_seq_len(states, input_batch.prompt_embeds.shape[1])]
-        if input_batch.do_true_cfg:
-            lengths.append(
-                self._resolve_prompt_seq_len(
-                    states, input_batch.negative_prompt_embeds.shape[1], "prefill_negative_prompt_seq_len"
-                )
-            )
-        for state in states:
-            if "art_conditions" not in state.extra:
-                continue
-            previous = state.extra.get("art_condition_lengths")
-            if previous is not None:
-                if previous != lengths:
-                    raise ValueError("ART replay requires a fixed prompt layout across ODE steps; enable prefix KV.")
-                continue
-            # Padding advances Qwen21's RoPE positions even when masked out as
-            # attention keys. Replay must retain the layout used at prefill.
-            for key, length in zip(("inputs", "negative_inputs")[: len(lengths)], lengths, strict=True):
-                condition = state.extra["art_conditions"][key]
-                embeds = condition["encoder_hidden_states"]
-                width = embeds.shape[1]
-                pad = length - width
-                condition["encoder_hidden_states"] = torch.nn.functional.pad(embeds, (0, 0, 0, pad))
-                mask = condition["encoder_hidden_states_mask"]
-                if mask is None:
-                    mask = torch.ones(embeds.shape[:2], dtype=torch.bool)
-                condition["encoder_hidden_states_mask"] = torch.nn.functional.pad(mask, (0, pad), value=False)
-                prefix_mask = torch.nn.functional.pad(condition["img_mask"][:, :width], (0, pad), value=False)
-                condition["img_mask"] = self._append_target_slots(prefix_mask, state.latents.shape[1])
-            state.extra["art_condition_lengths"] = lengths
-        return super()._denoise_step_homogeneous(input_batch)
-
     def step_scheduler(self, state, noise_pred, **kwargs):
         """Record the exact state and velocity consumed by the native scheduler."""
         recorder = state.extra.get("art_recorder")

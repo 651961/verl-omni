@@ -1516,6 +1516,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         """Validation via TransferQueue: dispatch, sample, convert, reward, dump media."""
         sample_inputs: list[str] = []
         sample_outputs: list[torch.Tensor] = []
+        sample_response_shapes: list = []
         sample_audios: list = []
         sample_audio_sample_rates: list = []
         sample_media_kinds: list = []
@@ -1583,6 +1584,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             )
             sample_inputs.extend(input_texts)
             sample_outputs.append(output_images)
+            sample_response_shapes.extend(data.non_tensor_batch.get("response_shape", [None] * len(data)))
             tool_extra = data.non_tensor_batch.get("tool_extra_fields")
             sample_audios.extend(_resolve_rollout_media_field(data, tool_extra, "audio"))
             sample_audio_sample_rates.extend(_resolve_rollout_media_field(data, tool_extra, "audio_sample_rate"))
@@ -1627,6 +1629,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             audios=sample_audios,
             audio_sample_rates=sample_audio_sample_rates,
             media_kinds=sample_media_kinds,
+            response_shapes=sample_response_shapes,
         )
 
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
@@ -1643,6 +1646,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 audios=sample_audios,
                 audio_sample_rates=sample_audio_sample_rates,
                 media_kind=resolve_batch_media_kind(sample_media_kinds),
+                response_shapes=sample_response_shapes,
             )
 
         data_sources_arr = np.concatenate(data_sources, axis=0) if data_sources else np.array([])
@@ -1656,6 +1660,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         audios=None,
         audio_sample_rates=None,
         media_kinds=None,
+        response_shapes=None,
     ):
         """Use the shared image/video W&B path with declared media metadata."""
         return BaseRayDiffusionTrainer._maybe_log_val_generations(
@@ -1666,6 +1671,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             audios=audios,
             audio_sample_rates=audio_sample_rates,
             media_kinds=media_kinds,
+            response_shapes=response_shapes,
         )
 
     def _dump_generations(
@@ -1681,6 +1687,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         audios=None,
         audio_sample_rates=None,
         media_kind=None,
+        response_shapes=None,
     ):
         """Validate media synchronously, then submit best-effort I/O with a step snapshot."""
         _validate_generation_outputs(outputs)
@@ -1705,6 +1712,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             audios_to_dump,
             audio_sample_rates_to_dump,
             media_kind,
+            response_shapes,
         )
         self._dump_futures.append((future, global_step))
         self._drain_dump_futures()
@@ -1754,6 +1762,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 audios=audios,
                 audio_sample_rates=audio_sample_rates,
                 media_kind=resolve_batch_media_kind(media_kinds),
+                response_shapes=(
+                    data.non_tensor_batch["response_shape"][sort_idx]
+                    if "response_shape" in data.non_tensor_batch
+                    else None
+                ),
             )
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns) -> dict:

@@ -290,12 +290,14 @@ class ARTCoreTests(unittest.TestCase):
             a = math.art_loss(*args, velocity_mask_metric=mode, **kwargs)
             b = originals["art"].art_loss(*args, velocity_mask_metric=mode, **kwargs)
             for key in a:
-                torch.testing.assert_close(a[key], b[key], rtol=0, atol=0)
+                # Per-feature schedules multiply before reduction, which can
+                # change FP32 rounding relative to the scalar-only source.
+                torch.testing.assert_close(a[key], b[key], rtol=1e-6, atol=1e-7)
             torch.testing.assert_close(
                 torch.autograd.grad(a["per_item_loss"].sum(), v, retain_graph=True)[0],
                 torch.autograd.grad(b["per_item_loss"].sum(), v, retain_graph=True)[0],
-                rtol=0,
-                atol=0,
+                rtol=1e-6,
+                atol=1e-7,
             )
         covariance_args = [torch.randn(6, 4, 3), torch.randn(6), torch.tensor([0, 0, 0, 1, 1, 1]), 2]
         a = math.art_scalar_covariance(*covariance_args, zero_signal_mode="exact")

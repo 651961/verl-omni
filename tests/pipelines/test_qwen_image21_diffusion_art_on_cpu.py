@@ -155,8 +155,8 @@ def pipeline_class():
     native._prepare_generation_context = prepare_context
     native.predict_noise_maybe_with_cfg = predict
     native.scheduler_step_maybe_with_cfg = lambda self, pred, t, latents, cfg, per_request_scheduler=None: (
-        (per_request_scheduler or self.scheduler).step(pred, t, latents, return_dict=False)[0]
-    )
+        per_request_scheduler or self.scheduler
+    ).step(pred, t, latents, return_dict=False)[0]
     native._decode_latents = lambda self, latents, *args: types.SimpleNamespace(output=latents)
     native.progress_bar = lambda self, **kwargs: nullcontext(types.SimpleNamespace(update=lambda: None))
     native.interrupt = False
@@ -233,19 +233,18 @@ class NativeAdapterTests(unittest.TestCase):
     def setUpClass(cls):
         cls.pipeline = pipeline_class()
 
-    def test_native_full_batch_and_step_outputs_match_cfg_and_versions(self):
+    def test_native_single_request_and_step_outputs_match_cfg_sizes_and_versions(self):
         for cfg in (1.0, 2.0):
             full = self.pipeline()
             full.set_published_policy_version(17)
-            params = [sampling(seed, cfg) for seed in (10, 11)]
-            outputs = full.forward(request(params))
-            self.assertTrue(full.supports_request_batch)
-            self.assertTrue(full.supports_step_execution)
             self.assertEqual(full.graph_releases, 1)
             step = self.pipeline()
             step.set_published_policy_version(17)
-            for row in range(2):
-                s = step.prepare_encode(state(str(row + 1), sampling(10 + row, cfg)))
+            for width in (32, 64):
+                params = sampling(10, cfg)
+                params.width = width
+                expected = full.forward(request([params]))[0]
+                s = step.prepare_encode(state("1", copy.deepcopy(params)))
                 for index in range(2):
                     s.current_timestep = s.timesteps[index]
                     batch = types.SimpleNamespace(
@@ -264,12 +263,17 @@ class NativeAdapterTests(unittest.TestCase):
                     pred = step.denoise_step(batch)
                     step.step_scheduler(s, pred)
                 actual = step.post_decode(s)
-                torch.testing.assert_close(actual.output, outputs[row].output, rtol=0, atol=0)
+                torch.testing.assert_close(actual.output, expected.output, rtol=0, atol=0)
                 for key in ("states", "old_velocities", "timesteps", "sigmas", "dt", "endpoints"):
-                    torch.testing.assert_close(actual.cache[key], outputs[row].cache[key], rtol=0, atol=0)
+                    torch.testing.assert_close(actual.cache[key], expected.cache[key], rtol=0, atol=0)
+                for branch in ("inputs", "negative_inputs") if cfg > 1 else ("inputs",):
+                    for key in ("encoder_hidden_states", "encoder_hidden_states_mask", "img_mask"):
+                        torch.testing.assert_close(
+                            actual.cache["conditions"][branch][key], expected.cache["conditions"][branch][key]
+                        )
                 self.assertEqual(actual.cache["policy_version"], 17)
+                self.assertEqual(actual.cache["width"], width)
                 self.assertEqual(actual.cache["conditions"]["negative_inputs"] is not None, cfg > 1)
-            self.assertFalse(torch.equal(outputs[0].cache["states"], outputs[1].cache["states"]))
 
     def test_validation_does_not_collect_trajectories_or_hooks(self):
         pipeline = self.pipeline()
@@ -279,42 +283,25 @@ class NativeAdapterTests(unittest.TestCase):
         s = pipeline.prepare_encode(state("1", sampling(3, capture_trajectory=False)))
         self.assertNotIn("art_recorder", s.extra)
 
-    def test_step_capture_keeps_prefill_padding_for_replay(self):
-        pipeline = self.pipeline()
-        s = pipeline.prepare_encode(state("1", sampling(10)))
-        s.current_timestep = s.timesteps[0]
-        original = s.prompt_embeds.clone()
-        batch = types.SimpleNamespace(
-            states=[s],
-            latents=s.latents,
-            timesteps=s.current_timestep,
-            do_true_cfg=False,
-            true_cfg_scale=1.0,
-            cfg_normalize=False,
-            prompt_embeds=torch.nn.functional.pad(original, (0, 0, 0, 4)),
-            prompt_embeds_mask=torch.nn.functional.pad(s.prompt_embeds_mask, (0, 4)),
-            negative_prompt_embeds=None,
-            negative_prompt_embeds_mask=None,
-            img_shapes=s.img_shapes,
-        )
-        seen = []
-        handle = pipeline.transformer.register_forward_pre_hook(
-            lambda module, args, kwargs: seen.append(kwargs), with_kwargs=True
-        )
-        try:
-            pipeline.denoise_step(batch)
-            condition = s.extra["art_conditions"]["inputs"]
-            for key in ("encoder_hidden_states", "encoder_hidden_states_mask", "img_mask"):
-                torch.testing.assert_close(condition[key], seen[0][key])
-            # Later decode can contain fewer/shorter requests; the KV layout
-            # and the replay condition must still use the prefill width.
-            batch.prompt_embeds = original
-            batch.prompt_embeds_mask = s.prompt_embeds_mask
-            pipeline.denoise_step(batch)
-            torch.testing.assert_close(condition["img_mask"], seen[1]["img_mask"])
-            self.assertEqual(condition["encoder_hidden_states"].shape[1], 7)
-        finally:
-            handle.remove()
+    def test_config_requires_one_request_including_engine_overrides(self):
+        from unittest.mock import patch
+
+        path = ROOT / "verl_omni/pipelines/qwen_image21_diffusion_art/diffusers_training_adapter.py"
+        cls = next(node for node in ast.parse(path.read_text()).body if isinstance(node, ast.ClassDef))
+        method = next(node for node in cls.body if getattr(node, "name", None) == "validate_art_config")
+        method.decorator_list = []
+        namespace = {}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), namespace)
+        rollout = types.SimpleNamespace(max_num_seqs=1, engine_kwargs={})
+        config = types.SimpleNamespace(actor_rollout_ref=types.SimpleNamespace(rollout=rollout))
+        with patch("importlib.util.find_spec", return_value=object()):
+            namespace["validate_art_config"](None, config)
+            for max_seqs, overrides in ((2, {}), (1, {"max_num_seqs": 2}), (1, {"max-num-seqs": 2})):
+                rollout.max_num_seqs = max_seqs
+                rollout.engine_kwargs = {"vllm_omni": overrides}
+                with self.subTest(max_num_seqs=max_seqs, overrides=overrides):
+                    with self.assertRaisesRegex(ValueError, "max_num_seqs=1"):
+                        namespace["validate_art_config"](None, config)
 
     def test_token_id_encoder_does_not_retokenize_and_keeps_norm_inputs(self):
         pipeline = self.pipeline()

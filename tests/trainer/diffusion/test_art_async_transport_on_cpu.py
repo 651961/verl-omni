@@ -61,7 +61,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 class_methods={"_write_trajectories_to_tq"},
             )["DiffusionAgentLoopWorkerTQ"]
             worker = cls()
-            worker.model_config = SimpleNamespace(algorithm="diffusion_art")
+            worker.model_config = SimpleNamespace(algorithm="diffusion_art", architecture="QwenImage21Pipeline")
             worker.config = SimpleNamespace(trainer={})
             worker.rollout_config = SimpleNamespace(max_num_seqs=1, engine_kwargs={})
             caches = [cache(seed=i) for i in range(2)]

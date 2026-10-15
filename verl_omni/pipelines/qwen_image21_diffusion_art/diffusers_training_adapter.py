@@ -31,9 +31,15 @@ class QwenImage21DiffusionART(DiffusionModelBase):
 
     @classmethod
     def validate_art_config(cls, config):
-        """Check native Qwen21 dependencies before allocating workers."""
+        """Require single-request rollout and native Qwen21 dependencies."""
         from importlib.util import find_spec
 
+        rollout = config.actor_rollout_ref.rollout
+        engine_kwargs = rollout.engine_kwargs.get("vllm_omni", {}) or {}
+        if rollout.max_num_seqs != 1 or any(
+            key.replace("-", "_") == "max_num_seqs" and value not in (None, 1) for key, value in engine_kwargs.items()
+        ):
+            raise ValueError("Qwen-Image 2.1 ART requires rollout.max_num_seqs=1.")
         if (
             find_spec("vllm_omni.diffusion.models.qwen_image_21") is None
             or find_spec("diffusers.models.transformers.transformer_qwenimage21") is None

@@ -33,6 +33,19 @@ class MiniMaxH3DiffusionART(MiniMaxH3DiffusionNFT):
         return False
 
     @classmethod
+    def cast_forward_inputs(cls):
+        """Keep native FP64 positions, FP32 clocks and rotary embeddings intact."""
+        return False
+
+    @classmethod
+    def configure_trainable_params(cls, module, model_config):
+        """Install H3 kernels before FSDP and optimizer construction."""
+        from .ops import apply_quack_rms_norms, apply_quack_rope
+
+        apply_quack_rms_norms(module)
+        apply_quack_rope()
+
+    @classmethod
     def validate_art_config(cls, config):
         """Reject runtime paths that bypass request-local native trajectory capture."""
         rollout = config.actor_rollout_ref.rollout
