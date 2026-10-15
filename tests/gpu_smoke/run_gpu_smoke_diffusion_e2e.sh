@@ -78,4 +78,12 @@ run_test 10 "Boogu-Image DiffusionNFT trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" BOOGU_REQUIRED=1 \
     bash tests/special_e2e/run_diffusionnft_boogu_image.sh "${diffusion_trainer_args[@]}"
 
+run_test 11 "MiniMax-H3 DiffusionART FL2VA variable-size trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    python3 tests/special_e2e/run_minimax_h3_diffusion_art_tiny.py --task fl2va
+
+run_test 12 "MiniMax-H3 DiffusionART Ref2VA variable-size trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    python3 tests/special_e2e/run_minimax_h3_diffusion_art_tiny.py --task ref2va
+
 gpu_smoke_summary

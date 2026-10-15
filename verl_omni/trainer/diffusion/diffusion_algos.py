@@ -140,6 +140,11 @@ class DiffusionLossFn(ABC):
             if getattr(algorithm_cfg, key, None) is not None:
                 raise ValueError(f"algorithm.{key} is only used by the dgpo loss.")
 
+    @staticmethod
+    def validate_model_config(config: Any) -> None:
+        """Validate model-specific requirements after architecture resolution, before worker allocation."""
+        return
+
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
 
@@ -818,7 +823,7 @@ class DiffusionARTLoss(DiffusionLossFn):
         reference_prediction=None,
     ):
         """Compute the frozen-target velocity loss and scalar training metrics."""
-        from .art_math import art_loss
+        from .art_math import art_loss, schedule_coefficient
 
         options = dict(config.diffusion_loss.get("art_loss_options", {}))
         if "reference_mse_beta" in options or "reference_prediction" in options:
@@ -826,8 +831,8 @@ class DiffusionARTLoss(DiffusionLossFn):
         current_mean = old_mean = None
         if options.get("mask_space", "velocity") == "ode_mean":
             with torch.no_grad():
-                current_mean = state.float() + dt.reshape(-1, 1, 1) * current_velocity.detach().float()
-                old_mean = state.float() + dt.reshape(-1, 1, 1) * old_velocity.detach().float()
+                current_mean = state.float() + schedule_coefficient(dt, state, "dt") * current_velocity.detach().float()
+                old_mean = state.float() + schedule_coefficient(dt, state, "dt") * old_velocity.detach().float()
         result = art_loss(
             current_velocity,
             old_velocity,
@@ -884,17 +889,12 @@ class DiffusionARTLoss(DiffusionLossFn):
         if config.actor_rollout_ref.actor.use_distill_loss:
             raise ValueError("ART does not support the policy-gradient distillation loss.")
 
-        from importlib.util import find_spec
+    @staticmethod
+    def validate_model_config(config):
+        """Dispatch native ART checks once the pipeline architecture is known."""
+        from verl_omni.pipelines.model_base import DiffusionModelBase
 
-        if (
-            find_spec("vllm_omni.diffusion.models.qwen_image_21") is None
-            or find_spec("diffusers.models.transformers.transformer_qwenimage21") is None
-        ):
-            raise ImportError(
-                "Qwen-Image 2.1 ART requires native QwenImage21 support in both diffusers and vllm-omni. "
-                "The repository's pinned serving version does not include it; install compatible builds "
-                "before selecting diffusion_art."
-            )
+        DiffusionModelBase.get_class(config.actor_rollout_ref.model).validate_art_config(config)
 
     @staticmethod
     def prepare_actor_batch(batch, reward_tensor, config):

@@ -391,6 +391,80 @@ class WiringTests(unittest.TestCase):
             self.assertTrue(OmegaConf.is_struct(model))
             registry.assert_called_once_with("QwenImage21Pipeline", "diffusion_art", None)
 
+    def test_trainer_validates_model_after_resolving_architecture(self):
+        from omegaconf import OmegaConf, open_dict
+
+        loss = Mock()
+        namespace = extract(
+            "verl_omni/trainer/diffusion/v1/trainer_base.py",
+            ["PolicyGradientDiffusionTrainerV1"],
+            {
+                "get_diffusion_loss_fn": lambda mode: loss,
+                "need_reference_policy": lambda config: False,
+                "reward_is_enabled": lambda config: False,
+                "is_distillation_enabled": lambda config: False,
+                "validate_distillation_config": lambda config: None,
+                "logger": Mock(),
+            },
+            class_methods={"__init__", "_setup"},
+        )
+        trainer_cls = namespace["PolicyGradientDiffusionTrainerV1"]
+        trainer_cls._build_replay_buffer = Mock()
+        for architecture in ("QwenImage21Pipeline", "MiniMaxH3Pipeline"):
+            with self.subTest(architecture=architecture):
+                config = OmegaConf.create(
+                    {
+                        "actor_rollout_ref": {
+                            "model": {"algorithm": "diffusion_art", "external_lib": None},
+                            "actor": {"diffusion_loss": {"loss_mode": "diffusion_art"}},
+                        },
+                        "algorithm": {"trainer_type": "direct_preference"},
+                        "trainer": {"v1": {"trainer_mode": "separate_async"}},
+                    }
+                )
+                OmegaConf.set_struct(config, True)
+                events = []
+
+                def resolve_architecture(config=config, architecture=architecture, events=events):
+                    with open_dict(config.actor_rollout_ref.model):
+                        config.actor_rollout_ref.model.architecture = architecture
+                    events.append("resolve")
+
+                def validate(resolved_config, architecture=architecture, events=events):
+                    self.assertEqual(resolved_config.actor_rollout_ref.model.architecture, architecture)
+                    events.append("validate")
+
+                loss.reset_mock()
+                loss.validate_model_config.side_effect = validate
+                trainer = trainer_cls(config)
+                loss.validate_trainer_config.assert_called_once_with(config)
+                loss.validate_model_config.assert_not_called()
+                trainer._init_tokenizer = resolve_architecture
+                for method in (
+                    "_init_dataloader",
+                    "_init_dump_executor",
+                    "_init_resource_pool_mgr",
+                    "_normalize_dynamic_bsz_config",
+                    "_init_colocated_workers",
+                    "_init_online_rollout_stack",
+                    "_load_checkpoint",
+                ):
+                    setattr(trainer, method, Mock())
+                trainer.resource_pool_manager = Mock(resource_pool_dict={})
+                trainer.resource_pool_manager.create_resource_pool.side_effect = lambda events=events: events.append(
+                    "workers"
+                )
+                trainer.checkpoint_manager = Mock()
+                trainer._setup()
+                self.assertEqual(events, ["resolve", "validate", "workers"])
+                loss.validate_model_config.assert_called_once_with(config)
+
+                loss.validate_model_config.side_effect = ValueError("unsupported ART config")
+                trainer.resource_pool_manager.create_resource_pool.reset_mock()
+                with self.assertRaisesRegex(ValueError, "unsupported ART config"):
+                    trainer._setup()
+                trainer.resource_pool_manager.create_resource_pool.assert_not_called()
+
     def test_registered_loss_uses_complete_groups_and_optional_reference(self):
         from collections import defaultdict
         from types import SimpleNamespace

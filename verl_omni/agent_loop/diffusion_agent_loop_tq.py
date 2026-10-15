@@ -227,7 +227,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         rows: dict[tuple[str, ...], list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
         art = getattr(getattr(self, "model_config", None), "algorithm", None) == "diffusion_art"
         share_art_conditions = False
-        if art and not validate:
+        if art and not validate and self.model_config.architecture == "QwenImage21Pipeline":
             engine_kwargs = {
                 key.replace("-", "_"): value
                 for key, value in (self.rollout_config.engine_kwargs.get("vllm_omni", {}) or {}).items()

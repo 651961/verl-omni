@@ -35,6 +35,7 @@ sys.modules[PACKAGE] = package
 
 def load(name):
     paths = {
+        "art_transport": "verl_omni/trainer/diffusion/art_data.py",
         "art_data": "verl_omni/pipelines/qwen_image21_diffusion_art/data.py",
         "art_media": "verl_omni/pipelines/qwen_image21/media.py",
         "art_capture": "verl_omni/pipelines/qwen_image21_diffusion_art/capture.py",
@@ -46,12 +47,14 @@ def load(name):
     module.__package__ = PACKAGE
     sys.modules[module.__name__] = module
     source = path.read_text().replace("from verl_omni.trainer.diffusion.art_math", "from " + PACKAGE + ".art_math")
+    source = source.replace("from verl_omni.trainer.diffusion.art_data", "from " + PACKAGE + ".art_transport")
     source = source.replace("from verl_omni.trainer.diffusion.art_capture", "from " + PACKAGE + ".art_recorder")
     exec(compile(source, str(path), "exec"), module.__dict__)
     return module
 
 
 math = load("art_math")
+transport = load("art_transport")
 data = load("art_data")
 recorder = load("art_recorder")
 capture = load("art_capture")

@@ -14,11 +14,9 @@
 
 """Qwen-Image 2.1 replay layouts for DiffusionART."""
 
-from collections import defaultdict
-
 import torch
 
-from verl_omni.trainer.diffusion.art_math import art_scalar_covariance
+from verl_omni.trainer.diffusion.art_data import pack_art_trajectories, pad_stack
 
 
 @torch.no_grad()
@@ -28,33 +26,11 @@ def pack_art_caches(caches, rewards, uids, *, covariance_options=None):
     Covariance is computed before DP dispatch, over complete prompt groups.
     Different prompts may have different resolutions and reference images.
     """
-    if not caches or len(caches) != len(uids):
-        raise ValueError("ART requires one cache and prompt uid per sample.")
-    rewards = torch.as_tensor(rewards, dtype=torch.float32).reshape(-1)
-    if rewards.numel() != len(caches):
-        raise ValueError("ART requires one scalar reward per sample.")
-    groups = defaultdict(list)
-    steps = None
-    for row, (cache, uid) in enumerate(zip(caches, uids, strict=True)):
-        groups[str(uid)].append(row)
-        for key in ("states", "old_velocities", "endpoints", "timesteps", "sigmas", "dt", "conditions"):
-            if key not in cache:
-                raise ValueError(f"ART rollout cache is missing {key}.")
+    fields = pack_art_trajectories(caches, rewards, uids, covariance_options=covariance_options)
+    for cache in caches:
         state = cache["states"]
-        if state.ndim != 3 or not state.numel() or state.shape != cache["old_velocities"].shape:
-            raise ValueError("ART states/old velocities must have shape [steps, tokens, channels].")
-        if cache["endpoints"].shape != state.shape[1:]:
-            raise ValueError("ART endpoint shape does not match trajectory states.")
-        if steps is None:
-            steps = state.shape[0]
-        if steps != state.shape[0]:
-            raise ValueError("ART samples must select the same number of training steps on all ranks.")
-        for key in ("timesteps", "sigmas", "dt"):
-            value = cache[key]
-            if value.shape != (steps,):
-                raise ValueError(f"Invalid ART {key} schedule.")
-        if not ((cache["sigmas"] > 0) & (cache["sigmas"] <= 1)).all() or not (cache["dt"] < 0).all():
-            raise ValueError("ART requires positive sigmas and decreasing ODE steps.")
+        if cache["sigmas"].ndim != 1:
+            raise ValueError("Qwen ART requires a scalar sigma per step.")
         conditions = cache["conditions"]
         reference = conditions["image_latents"]
         if reference.ndim != 3 or reference.shape[0] != 1 or reference.shape[-1] != state.shape[-1]:
@@ -83,45 +59,6 @@ def pack_art_caches(caches, rewards, uids, *, covariance_options=None):
             embed_mask = cond.get("encoder_hidden_states_mask")
             if embed_mask is not None and embed_mask.shape != emb.shape[:2]:
                 raise ValueError("ART encoder mask must align with the VLM embedding sequence.")
-    directions = [None] * len(caches)
-    magnitudes = torch.empty(len(caches), dtype=torch.float32)
-    for rows in groups.values():
-        if len(rows) < 2:
-            raise ValueError("ART covariance requires at least two samples per prompt.")
-        endpoints = [caches[row]["endpoints"].detach().float().cpu() for row in rows]
-        if any(x.shape != endpoints[0].shape for x in endpoints):
-            raise ValueError("Samples of the same ART prompt must use the same target resolution.")
-        result = art_scalar_covariance(
-            torch.stack(endpoints),
-            rewards[rows].cpu(),
-            torch.zeros(len(rows), dtype=torch.long),
-            1,
-            **{"zero_signal_mode": "exact", **(covariance_options or {})},
-        )
-        for row in rows:
-            directions[row] = result["group_directions"][0]
-            magnitudes[row] = result["group_guidance_magnitudes"][0]
-
-    def pad_stack(values):
-        values = [v.detach().cpu() for v in values]
-        rank = values[0].ndim
-        if any(v.ndim != rank or v.dtype != values[0].dtype for v in values):
-            raise ValueError("ART transport fields must have consistent rank and dtype.")
-        shape = tuple(max(v.shape[axis] for v in values) for axis in range(rank))
-        out = values[0].new_zeros((len(values), *shape))
-        for i, value in enumerate(values):
-            out[(i, *(slice(0, size) for size in value.shape))] = value
-        return out
-
-    fields = {
-        "art_states": pad_stack([c["states"].float() for c in caches]),
-        "art_old_velocities": pad_stack([c["old_velocities"].float() for c in caches]),
-        "art_directions": pad_stack(directions),
-        "art_magnitudes": magnitudes,
-        "art_token_count": torch.tensor([c["states"].shape[1] for c in caches]),
-    }
-    for key in ("timesteps", "sigmas", "dt"):
-        fields[f"art_{key}"] = torch.stack([c[key].detach().float().cpu() for c in caches])
     for prefix in ("", "negative_"):
         conditions = [c["conditions"].get(prefix + "inputs") for c in caches]
         prototype = caches[0]["conditions"]["inputs"]["encoder_hidden_states"]

@@ -55,6 +55,19 @@ def expand(value: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
     return value.reshape((-1,) + (1,) * (reference.ndim - 1))
 
 
+def schedule_coefficient(value: torch.Tensor, reference: torch.Tensor, name: str) -> torch.Tensor:
+    """Broadcast per-item or per-feature schedule coefficients without merging samples."""
+    if value.ndim > 0 and value.numel() == reference.shape[0]:
+        return expand(vector(value, reference, name), reference).float()
+    if (
+        value.ndim != reference.ndim
+        or value.shape[0] != reference.shape[0]
+        or any(size not in (1, target) for size, target in zip(value.shape[1:], reference.shape[1:], strict=True))
+    ):
+        raise ValueError(f"{name} must contain per-item or broadcastable per-feature coefficients")
+    return value.detach().to(device=reference.device, dtype=torch.float32)
+
+
 def art_loss(
     current_velocity: torch.Tensor,
     old_velocity: torch.Tensor,
@@ -85,7 +98,9 @@ def art_loss(
 
     Supports x0, uniform velocity, and sigma-weighted velocity MSE. The mask
     removes large outward moves but permits target-correcting moves. Inactive
-    rows train only if explicitly requested as restoring anchors.
+    rows train only if explicitly requested as restoring anchors. Sigma and ODE
+    coefficients may vary by feature for joint modalities with separate clocks;
+    weighting and scheduler metrics are reduced after applying those coefficients.
     """
     batch(current_velocity, "current_velocity")
     same_shape(current_velocity, old_velocity=old_velocity, guidance_direction=guidance_direction)
@@ -111,7 +126,7 @@ def art_loss(
         raise ValueError("target projection is supported only in x0 space")
     v = current_velocity.float()
     old = old_velocity.detach().to(v)
-    s = vector(sigma, v, "sigma").float()
+    s = schedule_coefficient(sigma, v, "sigma")
     magnitude = vector(guidance_magnitude, v, "guidance_magnitude").float()
     if ((s < 0) | (s > 1)).any():
         raise ValueError("sigma must be in [0, 1]")
@@ -132,14 +147,14 @@ def art_loss(
                 (projection / displacement.square().flatten(1).mean(1).sqrt().clamp_min(eps)).clamp_max(1),
                 v,
             )
-        target = (x - expand(s, v) * old + displacement).detach()
-        residual = target - (x - expand(s, v) * v)
-        desired_step = -expand(s, v) * residual.detach()
+        target = (x - s * old + displacement).detach()
+        residual = target - (x - s * v)
+        desired_step = -s * residual.detach()
     else:
         target = (old - displacement).detach()
         residual = target - v
         desired_step = residual.detach()
-    unmasked = weight * residual.square().flatten(1).mean(1)
+    unmasked = (weight * residual.square()).flatten(1).mean(1)
     movement = v - old
     energy = movement.square().flatten(1).mean(1)
     alignment = (movement * desired_step).flatten(1).mean(1)
@@ -149,7 +164,7 @@ def art_loss(
     ):
         if ode_velocity_coefficient is None:
             raise ValueError("this mask requires ode_velocity_coefficient")
-        dt = vector(ode_velocity_coefficient, v, "ode_velocity_coefficient").float()
+        dt = schedule_coefficient(ode_velocity_coefficient, v, "ode_velocity_coefficient")
         if (dt >= 0).any():
             raise ValueError("ODE coefficients must be negative")
         if mask_space == "ode_mean":
@@ -158,7 +173,7 @@ def art_loss(
             same_shape(v, current_ode_mean=current_ode_mean, old_ode_mean=old_ode_mean)
             mean_movement = current_ode_mean.float() - old_ode_mean.detach().to(v)
             energy = mean_movement.square().flatten(1).mean(1)
-            alignment = (mean_movement * expand(dt, v) * desired_step).flatten(1).mean(1)
+            alignment = (mean_movement * dt * desired_step).flatten(1).mean(1)
         else:
             initial = torch.isclose(s, torch.ones_like(s), atol=eps, rtol=0)
             std = torch.where(
@@ -167,18 +182,21 @@ def art_loss(
                 (noise**2 * s / (1 - s).clamp_min(eps) * (-dt)).clamp_min(0).sqrt(),
             )
             coefficient = torch.where(initial, dt, dt * (1 + 0.5 * noise**2))
-            energy = coefficient.square() * energy / (2 * std.square().clamp_min(eps**2))
+            energy = (
+                (coefficient.square() * movement.square() / (2 * std.square().clamp_min(eps**2))).flatten(1).mean(1)
+            )
             threshold = kl_threshold
     elif velocity_mask_metric == "noise_normalized_v":
-        energy = torch.where(s > 0, energy / torch.where(s > 0, s, 1.0), 0.0)
+        energy = torch.where(s > 0, movement.square() / torch.where(s > 0, s, 1.0), 0.0).flatten(1).mean(1)
         threshold = radius**2
-    active = (magnitude > 0) & (raw_rms > 0) & (s > 0)
+    positive_sigma = (s > 0).flatten(1).all(1)
+    active = (magnitude > 0) & (raw_rms > 0) & positive_sigma
     requested_anchor = (
         torch.zeros_like(active)
         if restore_anchor_mask is None
         else vector(restore_anchor_mask, v, "restore_anchor_mask").bool()
     )
-    anchor = requested_anchor & ~active & (s > 0)
+    anchor = requested_anchor & ~active & positive_sigma
     masked = (active & corrective_mask_enabled & (energy >= threshold) & (alignment > 0)).detach()
     keep = (anchor | (active & ~masked)).detach()
     policy = torch.where(keep, unmasked, torch.zeros_like(unmasked))

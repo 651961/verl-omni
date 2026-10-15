@@ -811,6 +811,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
     def _setup(self):
         self._init_tokenizer()
+        if self._loss_fn is not None:
+            self._loss_fn.validate_model_config(self.config)
         self._init_dataloader()
         self._init_dump_executor()
         self._init_resource_pool_mgr()

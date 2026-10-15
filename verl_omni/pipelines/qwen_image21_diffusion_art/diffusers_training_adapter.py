@@ -30,6 +30,17 @@ class QwenImage21DiffusionART(DiffusionModelBase):
     """Replay native Qwen-Image 2.1 conditions at frozen ART states."""
 
     @classmethod
+    def validate_art_config(cls, config):
+        """Check native Qwen21 dependencies before allocating workers."""
+        from importlib.util import find_spec
+
+        if (
+            find_spec("vllm_omni.diffusion.models.qwen_image_21") is None
+            or find_spec("diffusers.models.transformers.transformer_qwenimage21") is None
+        ):
+            raise ImportError("Qwen-Image 2.1 ART requires native QwenImage21 support in diffusers and vllm-omni.")
+
+    @classmethod
     def prepare_processor_files(cls, model_path: str) -> str:
         """Add the VLM config expected by ``AutoProcessor``.
 
@@ -113,6 +124,11 @@ class QwenImage21DiffusionART(DiffusionModelBase):
         from .data import pack_art_caches
 
         return pack_art_caches(caches, rewards, uids, covariance_options=covariance_options)
+
+    @classmethod
+    def art_loss_coefficients(cls, micro_batch, step):
+        """Return the scalar schedule shared by all image tokens."""
+        return micro_batch["art_sigmas"][:, step], micro_batch["art_dt"][:, step]
 
     @classmethod
     def forward_art_velocity(cls, module, micro_batch, step):

@@ -30,9 +30,9 @@ def validate_art_precision(model, actor):
     if mp.get("reduce_dtype", "fp32") not in ("fp32", "float32"):
         raise ValueError("ART gradient synchronization must use FP32.")
     if actor.get("ppo_micro_batch_size_per_gpu") != 1:
-        raise ValueError("Qwen-Image 2.1 ART requires ppo_micro_batch_size_per_gpu=1.")
+        raise ValueError("ART requires ppo_micro_batch_size_per_gpu=1.")
     if engine.get("ulysses_sequence_parallel_size", 1) != 1:
-        raise ValueError("Qwen-Image 2.1 ART currently requires training SP=1.")
+        raise ValueError("ART currently requires training SP=1.")
     if actor.get("use_no_sync_for_gradient_accumulation", False) or engine.get("offload_policy", False):
         raise ValueError("ART requires per-backward gradient synchronization and no FSDP CPUOffloadPolicy.")
     if actor.get("optim", {}).get("optimizer", "adamw").lower() not in ("adam", "adamw"):

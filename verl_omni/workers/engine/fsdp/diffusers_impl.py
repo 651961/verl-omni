@@ -1649,11 +1649,12 @@ class ARTDiffusersFSDPEngine(DiffusersFSDPEngine):
             model_output = {"noise_pred": padded}
             loss, metrics = prediction.new_zeros(()), {}
         else:
+            sigma, dt = DiffusionModelBase.get_class(self.model_config).art_loss_coefficients(micro_batch, step)
             fields = {
                 "old_velocity": micro_batch["art_old_velocities"][:, step, :n],
                 "state": state,
-                "sigma": micro_batch["art_sigmas"][:, step],
-                "dt": micro_batch["art_dt"][:, step],
+                "sigma": sigma,
+                "dt": dt,
                 "direction": micro_batch["art_directions"][:, :n],
                 "magnitude": micro_batch["art_magnitudes"],
             }
