@@ -15,6 +15,7 @@
 
 import ast
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -247,6 +248,29 @@ def test_all_pipelines_reload_and_forward(tmp_path, architecture):
         if not name.startswith("transformer/"):
             assert after[name] == digest, name
     assert validate_artifact(result.output_dir)["trained_components"] == ["transformer"]
+
+
+@pytest.mark.parametrize("sigmas", [[], ["diffusers", "EulerDiscreteScheduler"], [True], [float("inf")]])
+def test_qwen21_rejects_invalid_sample_sigmas(tmp_path, sigmas):
+    config, _ = _case(tmp_path, "QwenImage21Pipeline", pipeline=True)
+    path = Path(config.base_model) / "model_index.json"
+    index = read_json(path)
+    index["sample_sigmas"] = sigmas
+    path.write_text(json.dumps(index), encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid pipeline option: sample_sigmas"):
+        merge_model(config)
+    assert not Path(config.target_dir).exists()
+
+
+def test_qwen21_pipeline_without_fixed_sigmas(tmp_path):
+    config, _ = _case(tmp_path, "QwenImage21Pipeline", pipeline=True)
+    path = Path(config.base_model) / "model_index.json"
+    index = read_json(path)
+    index["sample_sigmas"] = None
+    write_json(path, index)
+    result = merge_model(config)
+    loaded = diffusers.QwenImage21Pipeline.from_pretrained(result.output_dir, local_files_only=True)
+    assert loaded.config.sample_sigmas is None
 
 
 def test_all_tiny_models_train_one_step_save_with_fsdp2_and_merge(tmp_path):

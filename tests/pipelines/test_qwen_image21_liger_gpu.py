@@ -19,8 +19,18 @@ import copy
 import pytest
 import torch
 from test_qwen_image21_liger_on_cpu import configure_adapter, norms, qwen, tiny_model
+from torch.utils._python_dispatch import TorchDispatchMode
+
+from verl_omni.utils.diffusion_checkpoint import enable_gradient_checkpointing
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for Liger kernels")
+
+
+@pytest.fixture(autouse=True)
+def enable_training_gradients():
+    # Optional serving dependencies may disable gradients during package import.
+    with torch.enable_grad():
+        yield
 
 
 def relative_error(actual, expected):
@@ -55,7 +65,18 @@ def test_real_norm_shapes_forward_backward(zero_centered, dim, scale):
     torch.testing.assert_close(dy, original_dy, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("checkpointing", [False, True])
+class _CountFlashAttention(TorchDispatchMode):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if func == torch.ops.aten._scaled_dot_product_flash_attention.default:
+            self.calls += 1
+        return func(*args, **(kwargs or {}))
+
+
+@pytest.mark.parametrize("checkpointing", [False, True, "selective"])
 @pytest.mark.parametrize("padded", [False, True])
 def test_transformer_forward_backward_and_optimizer_step(checkpointing, padded, monkeypatch):
     torch.manual_seed(71)
@@ -63,7 +84,8 @@ def test_transformer_forward_backward_and_optimizer_step(checkpointing, padded, 
     candidate = copy.deepcopy(native)
     if checkpointing:
         native.enable_gradient_checkpointing()
-        candidate.enable_gradient_checkpointing()
+        save_ops = ["aten._scaled_dot_product_flash_attention.default"] if checkpointing == "selective" else []
+        enable_gradient_checkpointing(candidate, save_ops)
     inputs = {
         "hidden_states": torch.randn(1, 16, 4, device="cuda", dtype=torch.bfloat16),
         "encoder_hidden_states": torch.randn(1, 8, 8, device="cuda", dtype=torch.bfloat16),
@@ -91,9 +113,14 @@ def test_transformer_forward_backward_and_optimizer_step(checkpointing, padded, 
             return kernel(*args, **kwargs)
 
         spy.setattr(norms, "apply_rotary_emb", tracked_kernel)
-        actual = candidate(**inputs)[0]
-        assert relative_error(actual, expected) < 0.01
-        actual.backward(dy)
+        with _CountFlashAttention() as attention:
+            actual = candidate(**inputs)[0]
+            forward_calls = attention.calls
+            assert relative_error(actual, expected) < 0.01
+            actual.backward(dy)
+        if not padded:
+            assert forward_calls > 0
+        assert attention.calls == forward_calls * (2 if checkpointing is True else 1)
     assert len(calls) == len(candidate.transformer_blocks) * 2 * (2 if checkpointing else 1)
     expected_params = dict(native.named_parameters())
     for name, param in candidate.named_parameters():

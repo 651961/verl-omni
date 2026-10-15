@@ -43,6 +43,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.model.model_type=diffusion_art_model \
     actor_rollout_ref.model.algorithm=diffusion_art \
     actor_rollout_ref.model.attn_backend=native \
+    actor_rollout_ref.model.gradient_checkpointing_save_ops='[aten._scaled_dot_product_flash_attention.default]' \
     actor_rollout_ref.model.use_regional_compile=false \
     actor_rollout_ref.model.lora_rank=0 \
     actor_rollout_ref.model.policy_state_adapters='[default]' \

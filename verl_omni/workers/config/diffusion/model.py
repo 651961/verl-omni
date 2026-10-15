@@ -86,6 +86,10 @@ class DiffusionModelConfig(BaseConfig):
     external_lib: Optional[str] = None
 
     enable_gradient_checkpointing: bool = True
+
+    # FSDP SAC: torch operator overloads whose outputs are saved instead of recomputed.
+    gradient_checkpointing_save_ops: list[str] = field(default_factory=list)
+
     attn_backend: str = "_flash_3_varlen_hub"
 
     # Compile repeated diffusion transformer blocks before FSDP2 sharding.
@@ -135,6 +139,8 @@ class DiffusionModelConfig(BaseConfig):
     transformer_subfolder: str = "transformer"
 
     def __post_init__(self):
+        if self.gradient_checkpointing_save_ops and not self.enable_gradient_checkpointing:
+            raise ValueError("gradient_checkpointing_save_ops requires enable_gradient_checkpointing=True.")
         import_external_libs(self.external_lib)
 
         valid_backends = {"native", "_native_npu", "flash_varlen_hub", "_flash_3_varlen_hub"}

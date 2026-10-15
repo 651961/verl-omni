@@ -178,6 +178,23 @@ one sample per GPU. Each selected trajectory state contributes a forward/backwar
 before the optimizer update; 8 or 28 replay steps do **not** mean 8 or 28 independent
 optimizer updates. Gradient checkpointing adds block recomputation.
 
+Both recipes enable selective activation checkpointing (SAC) with
+`gradient_checkpointing_save_ops=[aten._scaled_dot_product_flash_attention.default]`
+to retain Flash Attention outputs while recomputing the rest of each block.
+To use ordinary checkpointing instead:
+
+```bash
+bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_turbo.sh \
+    actor_rollout_ref.model.gradient_checkpointing_save_ops='[]'
+```
+
+The framework default is an empty list. Entries name registered
+`torch.ops` overloads; select the operators used by the actual attention backend.
+The recipes target the segmented Flash Attention path used for unpadded
+Qwen Image 2.1 ART samples. Other attention paths need their own operator selection.
+SAC increases activation memory; measure peak memory and actor update time for
+your workload. It requires `enable_gradient_checkpointing=true`.
+
 `ART_STEP_INDICES='[0,2,4,6]'` selects four states for either recipe. Indices must be sorted,
 unique, and within the actual schedule. Subsampling changes the training objective's
 sampling; it is not a lossless performance optimization.
