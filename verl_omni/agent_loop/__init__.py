@@ -17,6 +17,7 @@
 # imported. Do not re-export the classes from the pipeline package __init__
 # (import cycle).
 from verl_omni.pipelines.ltx2_flow_grpo.agent_loop import LTX2DiffusionSingleTurnAgentLoop
+from verl_omni.pipelines.minimax_h3_diffusion_art.agent_loop import MiniMaxH3ARTAgentLoop
 from verl_omni.pipelines.minimax_h3_diffusion_nft.agent_loop import MiniMaxH3DiffusionSingleTurnAgentLoop
 from verl_omni.pipelines.qwen_image21.agent_loop import QwenImage21AgentLoop
 
@@ -38,5 +39,6 @@ __all__ = [
     "OmniSingleTurnAgentLoop",
     "LTX2DiffusionSingleTurnAgentLoop",
     "MiniMaxH3DiffusionSingleTurnAgentLoop",
+    "MiniMaxH3ARTAgentLoop",
     "QwenImage21AgentLoop",
 ]
