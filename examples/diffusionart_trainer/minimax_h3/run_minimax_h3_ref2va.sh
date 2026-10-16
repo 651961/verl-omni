@@ -2,6 +2,9 @@
 # MiniMax H3 Ref2VA full-parameter DiffusionART with separate actor/rollout pools.
 set -euo pipefail
 
+export HF_HUB_OFFLINE=1
+export LOCAL_KERNELS="kernels-community/flash-attn2=/models/kernels-community/flash-attn2"
+
 # Train and validation rows must set extra_info.height, width and num_frames.
 # Geometry may vary between prompts; generation always uses 24 fps.
 

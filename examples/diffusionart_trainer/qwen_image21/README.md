@@ -1,6 +1,6 @@
 # Qwen-Image 2.1 DiffusionART
 
-Last updated: 10/14/2026
+Last updated: 10/17/2026
 
 Full-parameter RL post-training for [Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1)
 and [Qwen-Image-2.1-Turbo](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo), using the V1
