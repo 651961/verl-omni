@@ -115,6 +115,11 @@ class DiffusionModelBase(ABC):
         return True
 
     @classmethod
+    def cast_forward_inputs(cls) -> bool:
+        """Whether FSDP casts floating inputs to its parameter compute dtype."""
+        return True
+
+    @classmethod
     def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
         """Submodule name components to leave unsharded under FSDP2 (default: none).
 

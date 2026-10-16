@@ -245,12 +245,14 @@ def dump_generations(
     audios=None,
     audio_sample_rates=None,
     media_kind=None,
+    response_shapes=None,
 ):
     """Dump samples to disk as media files plus a JSONL index.
 
-    ``outputs`` is a batch of images ``[N, C, H, W]`` (-> ``{i}.jpg``) or videos
+    ``outputs`` is a batch of images ``[N, C, H, W]`` (JPEG, or PNG for RGBA) or videos
     ``[N, T, C, H, W]`` (-> ``{i}.mp4`` at ``fps``). ``max_samples`` caps how many
     are written (``None`` = all). Optional generated audio is muxed into video files.
+    ``response_shapes`` removes transport padding before exporting each sample.
     Failed video exports are preserved as ``{i}.pt`` fallback payloads when possible.
     Media failures are recorded in JSONL; filesystem failures warn and skip the dump.
     """
@@ -284,10 +286,13 @@ def dump_generations(
         audios = batch_items(audios, n_full, "audio")
         audio_sample_rates = batch_items(audio_sample_rates, n_full, "audio_sample_rate")
         for i in range(n):
+            video = outputs[i]
+            if response_shapes is not None and response_shapes[i] is not None:
+                video = video[tuple(slice(0, size) for size in response_shapes[i])]
             video_path = os.path.join(visual_folder, f"{i}.mp4")
             try:
                 _export_video(
-                    outputs[i],
+                    video,
                     video_path,
                     fps=fps,
                     audio=audios[i],
@@ -300,7 +305,7 @@ def dump_generations(
                 if isinstance(fallback_audio, torch.Tensor):
                     fallback_audio = fallback_audio.detach().cpu()
                 fallback = {
-                    "video": outputs[i].detach().cpu(),
+                    "video": video.detach().cpu(),
                     "audio": fallback_audio,
                     "audio_sample_rate": audio_sample_rates[i],
                 }
@@ -324,9 +329,12 @@ def dump_generations(
             else:
                 output_paths.append(video_path)
     else:
-        images_pil = outputs[:n].cpu().permute(0, 2, 3, 1).numpy()
-        for i, image in enumerate(images_pil):
-            image_path = os.path.join(visual_folder, f"{i}.jpg")
+        for i, image in enumerate(outputs[:n]):
+            if response_shapes is not None and response_shapes[i] is not None:
+                image = image[tuple(slice(0, size) for size in response_shapes[i])]
+            image = image.cpu().permute(1, 2, 0).numpy()
+            extension = "png" if image.shape[-1] == 4 else "jpg"
+            image_path = os.path.join(visual_folder, f"{i}.{extension}")
             try:
                 Image.fromarray(image).save(image_path)
             except (OSError, ValueError) as error:
@@ -630,6 +638,7 @@ class BaseRayDiffusionTrainer(ABC):
         audios=None,
         audio_sample_rates=None,
         media_kinds=None,
+        response_shapes=None,
     ):
         """Log a table of validation samples to the configured logger (wandb or swanlab)."""
 
@@ -647,7 +656,13 @@ class BaseRayDiffusionTrainer(ABC):
         audio_sample_rates = batch_items(audio_sample_rates, len(inputs), "audio_sample_rate")
         media_kinds = batch_items(media_kinds, len(inputs), "media_kind")
         resolve_batch_media_kind(media_kinds)
-        samples = list(zip(inputs, list(outputs), scores, audios, audio_sample_rates, media_kinds, strict=True))
+        images = list(outputs)
+        if response_shapes is not None:
+            images = [
+                image[tuple(slice(0, size) for size in shape)] if shape is not None else image
+                for image, shape in zip(images, response_shapes, strict=True)
+            ]
+        samples = list(zip(inputs, images, scores, audios, audio_sample_rates, media_kinds, strict=True))
         samples.sort(key=lambda x: x[0])  # Sort by input text
 
         # Use fixed random seed for deterministic shuffling
@@ -1055,7 +1070,7 @@ class BaseRayDiffusionTrainer(ABC):
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
         reward_loop_worker_handles = (
-            self.reward_loop_manager.reward_loop_workers if self.enable_agent_reward_loop else None
+            self.reward_loop_manager.reward_loop_worker_handles if self.enable_agent_reward_loop else None
         )
 
         self.llm_server_manager = LLMServerManager.create(

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import ray
+import torch
 from verl.checkpoint_engine import CheckpointEngineManager, CheckpointEngineRegistry
 from verl.utils.ray_utils import auto_await
 
@@ -72,6 +73,12 @@ def _flatten_flush_stream(flushes):
     """
     for flush_idx, (named, _is_last) in enumerate(flushes):
         for name, tensor in named:
+            if name == "__delta_spec__" and tensor.numel() % 8:
+                # The bucketed sender packs bytes without inserting dtype alignment.
+                # JSON whitespace keeps subsequent BF16/FP32 values aligned; indices
+                # already occupy multiples of four bytes, and values use one rollout dtype.
+                padding = tensor.new_full((8 - tensor.numel() % 8,), ord(" "))
+                tensor = torch.cat((tensor, padding))
             yield f"{name}#{flush_idx}", tensor
 
 
@@ -89,10 +96,12 @@ class OmniCheckpointEngineManager(CheckpointEngineManager):
         if self.backend != "naive":
             peft_config = self._fetch_actor_lora_peft_config()
             self._lora_peft_config = peft_config
-            await self._push_lora_peft_config_to_replicas(peft_config)
-        await super().update_weights(global_steps=global_steps)
+            await self._push_lora_peft_config_to_replicas(peft_config, global_steps=global_steps)
+        return await super().update_weights(global_steps=global_steps)
 
-    async def _push_lora_peft_config_to_replicas(self, peft_config: dict | None) -> None:
+    async def _push_lora_peft_config_to_replicas(
+        self, peft_config: dict | None, global_steps: int | None = None
+    ) -> None:
         """Fetch ``peft_config`` from the actor (collective-free) and stash it
         on every standalone rollout replica's worker extension.
 
@@ -100,7 +109,10 @@ class OmniCheckpointEngineManager(CheckpointEngineManager):
         futures = [
             replica.server_handle.collective_rpc.remote(
                 "set_pending_lora_peft_config",
-                kwargs={"peft_config": peft_config},
+                kwargs={
+                    "peft_config": peft_config,
+                    **({"global_steps": global_steps} if global_steps is not None else {}),
+                },
             )
             for replica in self.replicas
             if replica.server_handle is not None

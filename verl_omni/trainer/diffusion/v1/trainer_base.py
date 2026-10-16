@@ -675,6 +675,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 "model_type=diffusion_dpo_model so infer_actor_batch / infer_ref_batch "
                 "emit noise_pred rather than SDE log_probs."
             )
+        if self.config.actor_rollout_ref.model.algorithm == "diffusion_art":
+            return DataProto.from_tensordict(tu.get_tensordict({"art_ref_predictions": noise_pred.float()}))
         if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
             noise_pred = noise_pred[:, 0]
         noise = tu.get(output, "noise")
@@ -809,6 +811,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
     def _setup(self):
         self._init_tokenizer()
+        if self._loss_fn is not None:
+            self._loss_fn.validate_model_config(self.config)
         self._init_dataloader()
         self._init_dump_executor()
         self._init_resource_pool_mgr()
@@ -828,7 +832,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         from verl.utils import hf_processor, hf_tokenizer
 
-        from verl_omni.utils.fs import resolve_model_local_dir
+        from verl_omni.utils.fs import resolve_diffusion_tokenizer_path, resolve_model_local_dir
 
         local_path = resolve_model_local_dir(
             self.config.actor_rollout_ref.model.path,
@@ -837,10 +841,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         trust_remote_code = self.config.data.get("trust_remote_code", False)
 
         if self.config.actor_rollout_ref.model.tokenizer_path is None:
-            tokenizer_path = os.path.join(local_path, "tokenizer")
-            self.config.actor_rollout_ref.model.tokenizer_path = (
-                tokenizer_path if os.path.exists(tokenizer_path) else local_path
-            )
+            self.config.actor_rollout_ref.model.tokenizer_path = resolve_diffusion_tokenizer_path(local_path)
         self.tokenizer = hf_tokenizer(
             self.config.actor_rollout_ref.model.tokenizer_path, trust_remote_code=trust_remote_code
         )
@@ -861,6 +862,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 ) from exc
 
         from verl_omni.pipelines.model_base import DiffusionModelBase
+
+        # Keep the resolved architecture available to model-specific batch preparation.
+        with open_dict(model_config):
+            model_config.architecture = architecture
 
         prepared_processor_path = DiffusionModelBase.get_class_by_name(
             architecture,
@@ -1172,6 +1177,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         batch_dict["index"] = np.arange(len(batch_dict["raw_prompt"]))
         batch_dict["gen_batch_seq"] = np.full(len(batch_dict["raw_prompt"]), self._gen_batch_seq)
         self._gen_batch_seq += 1
+        # Generation chunks may each have index=0. Use a run-wide prompt
+        # counter for noise seeds, independent of chunking and worker routing.
+        seed_offset = getattr(self, "_rollout_seed_offset", 0)
+        count = len(batch_dict["raw_prompt"])
+        batch_dict["_rollout_seed_global_idx"] = np.arange(seed_offset, seed_offset + count)
+        self._rollout_seed_offset = seed_offset + count
         return tu.get_tensordict(batch_dict)
 
     def _generation_batch_size(self) -> int:
@@ -1505,6 +1516,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         """Validation via TransferQueue: dispatch, sample, convert, reward, dump media."""
         sample_inputs: list[str] = []
         sample_outputs: list[torch.Tensor] = []
+        sample_response_shapes: list = []
         sample_audios: list = []
         sample_audio_sample_rates: list = []
         sample_media_kinds: list = []
@@ -1572,6 +1584,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             )
             sample_inputs.extend(input_texts)
             sample_outputs.append(output_images)
+            sample_response_shapes.extend(data.non_tensor_batch.get("response_shape", [None] * len(data)))
             tool_extra = data.non_tensor_batch.get("tool_extra_fields")
             sample_audios.extend(_resolve_rollout_media_field(data, tool_extra, "audio"))
             sample_audio_sample_rates.extend(_resolve_rollout_media_field(data, tool_extra, "audio_sample_rate"))
@@ -1601,7 +1614,14 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
             tq.kv_clear(keys=batch_meta.keys, partition_id=batch_meta.partition_id)
 
-        sample_outputs = torch.cat(sample_outputs, dim=0) if sample_outputs else torch.empty(0)
+        if self.config.actor_rollout_ref.model.algorithm == "diffusion_art" and sample_outputs:
+            from .tq_utils import _stack_field
+
+            sample_outputs = _stack_field(
+                [image for batch_images in sample_outputs for image in batch_images], pad_all_dims=True
+            )
+        else:
+            sample_outputs = torch.cat(sample_outputs, dim=0) if sample_outputs else torch.empty(0)
         self._maybe_log_val_generations(
             inputs=sample_inputs,
             outputs=sample_outputs,
@@ -1609,6 +1629,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             audios=sample_audios,
             audio_sample_rates=sample_audio_sample_rates,
             media_kinds=sample_media_kinds,
+            response_shapes=sample_response_shapes,
         )
 
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
@@ -1625,6 +1646,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 audios=sample_audios,
                 audio_sample_rates=sample_audio_sample_rates,
                 media_kind=resolve_batch_media_kind(sample_media_kinds),
+                response_shapes=sample_response_shapes,
             )
 
         data_sources_arr = np.concatenate(data_sources, axis=0) if data_sources else np.array([])
@@ -1638,6 +1660,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         audios=None,
         audio_sample_rates=None,
         media_kinds=None,
+        response_shapes=None,
     ):
         """Use the shared image/video W&B path with declared media metadata."""
         return BaseRayDiffusionTrainer._maybe_log_val_generations(
@@ -1648,6 +1671,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             audios=audios,
             audio_sample_rates=audio_sample_rates,
             media_kinds=media_kinds,
+            response_shapes=response_shapes,
         )
 
     def _dump_generations(
@@ -1663,6 +1687,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         audios=None,
         audio_sample_rates=None,
         media_kind=None,
+        response_shapes=None,
     ):
         """Validate media synchronously, then submit best-effort I/O with a step snapshot."""
         _validate_generation_outputs(outputs)
@@ -1687,6 +1712,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             audios_to_dump,
             audio_sample_rates_to_dump,
             media_kind,
+            response_shapes,
         )
         self._dump_futures.append((future, global_step))
         self._drain_dump_futures()
@@ -1736,6 +1762,11 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 audios=audios,
                 audio_sample_rates=audio_sample_rates,
                 media_kind=resolve_batch_media_kind(media_kinds),
+                response_shapes=(
+                    data.non_tensor_batch["response_shape"][sort_idx]
+                    if "response_shape" in data.non_tensor_batch
+                    else None
+                ),
             )
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns) -> dict:

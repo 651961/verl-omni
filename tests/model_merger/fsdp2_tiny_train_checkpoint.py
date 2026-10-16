@@ -68,11 +68,12 @@ def _run_one(architecture: str, root: Path, mesh, lora: bool) -> None:
         before = tuple(value.detach().cpu().clone() for value in _tensor_outputs(model(**forward_inputs(architecture))))
 
     model.train()
-    outputs = _tensor_outputs(model(**forward_inputs(architecture)))
-    loss = sum((value.float() - 0.25).square().mean() for value in outputs)
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad(set_to_none=True)
+    with torch.enable_grad():
+        outputs = _tensor_outputs(model(**forward_inputs(architecture)))
+        loss = sum((value.float() - 0.25).square().mean() for value in outputs)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
     model.eval()
     with torch.no_grad():

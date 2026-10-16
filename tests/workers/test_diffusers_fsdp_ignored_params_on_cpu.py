@@ -52,22 +52,25 @@ def _engine(strategy="fsdp2"):
     return engine
 
 
-def _adapter_cls(ignored_names):
+def _adapter_cls(ignored_names, cast_inputs=True):
     adapter_cls = MagicMock()
     adapter_cls.preserve_fp32_modules.return_value = True
+    adapter_cls.cast_forward_inputs.return_value = cast_inputs
     adapter_cls.get_fsdp_ignored_module_names.return_value = ignored_names or []
     return adapter_cls
 
 
-def test_build_fsdp_module_threads_adapter_ignored_names_into_fsdp2(monkeypatch):
+@pytest.mark.parametrize("cast_inputs", [True, False])
+def test_build_fsdp_module_threads_adapter_policy_into_fsdp2(monkeypatch, cast_inputs):
     module = _FrozenTowerModule()
     captured = {}
 
     def fake_apply_fsdp2(model, fsdp_kwargs, config, ignored_names=()):
         captured["ignored_names"] = list(ignored_names)
+        captured["cast_inputs"] = fsdp_kwargs["mp_policy"].cast_forward_inputs
 
     monkeypatch.setattr(
-        diffusers_impl.DiffusionModelBase, "get_class", staticmethod(lambda cfg: _adapter_cls(["tower"]))
+        diffusers_impl.DiffusionModelBase, "get_class", staticmethod(lambda cfg: _adapter_cls(["tower"], cast_inputs))
     )
     monkeypatch.setattr(diffusers_impl, "apply_fsdp2", fake_apply_fsdp2)
     monkeypatch.setattr(diffusers_impl, "get_fsdp_wrap_policy", lambda **kwargs: None)
@@ -78,12 +81,14 @@ def test_build_fsdp_module_threads_adapter_ignored_names_into_fsdp2(monkeypatch)
     engine = _engine()
     assert engine._build_fsdp_module(module) is module
     assert captured["ignored_names"] == ["tower"]
+    assert captured["cast_inputs"] is cast_inputs
 
     # An adapter that does not opt in keeps the empty default.
     monkeypatch.setattr(diffusers_impl.DiffusionModelBase, "get_class", staticmethod(lambda cfg: _adapter_cls(None)))
     engine = _engine()
     engine._build_fsdp_module(module)
     assert captured["ignored_names"] == []
+    assert captured["cast_inputs"] is True
 
 
 def test_build_fsdp_module_fsdp1_rejects_ignored_names(monkeypatch):

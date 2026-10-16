@@ -14,6 +14,7 @@
 """Publish complete, audited Diffusers transformers with unchanged base components."""
 
 import inspect
+import math
 import os
 import shutil
 from collections.abc import Iterator, Mapping
@@ -377,6 +378,14 @@ def _check_pipeline(base: Path, architecture: str, component: str) -> None:
             continue
         value = config[key]
         expected = types[key]
+        if architecture == "QwenImage21Pipeline" and key == "sample_sigmas":
+            if value is not None and (
+                not isinstance(value, list)
+                or not value
+                or any(type(sigma) not in (int, float) or not math.isfinite(sigma) for sigma in value)
+            ):
+                raise ValueError(f"Invalid pipeline option: {key}")
+            continue
         # Pipeline options (e.g. Wan boundary_ratio) are not component descriptors.
         if all(kind in (bool, int, float, str, type(None)) for kind in expected):
             if not any(type(value) is kind for kind in expected):

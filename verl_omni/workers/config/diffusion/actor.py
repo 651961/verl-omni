@@ -49,6 +49,13 @@ class DiffusionLossConfig(BaseConfig):
     dgpo_beta: float = 100.0
     dgpo_clip_range: float = 0.01
 
+    # Overrides for the ART velocity objective.
+    art_loss_options: dict = field(default_factory=dict)
+    # Complete-prompt covariance and zero-signal handling.
+    art_covariance_options: dict = field(default_factory=lambda: {"zero_signal_mode": "exact"})
+    # Restore zero-guidance ART samples toward their cached rollout predictions.
+    art_restore_zero_signal: bool = True
+
     def __post_init__(self):
         """Validate diffusion loss configuration."""
         valid_modes = [
@@ -56,6 +63,7 @@ class DiffusionLossConfig(BaseConfig):
             "flow_dppo",
             "grpo_guard",
             "diffusion_nft",
+            "diffusion_art",
             "dgpo",
             "dpo",
             "dmd2",

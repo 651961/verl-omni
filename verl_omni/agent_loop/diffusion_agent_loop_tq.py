@@ -83,6 +83,9 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                     rollout_seed_meta.data if isinstance(rollout_seed_meta, NonTensorData) else rollout_seed_meta
                 )
 
+        if getattr(self.model_config, "algorithm", None) == "diffusion_art":
+            sampling_params["art_capture_trajectory"] = not bool(validate)
+
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch:
             default_agent_loop = config.agent.default_agent_loop
@@ -139,11 +142,10 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             for session_id in range(n):
                 run_sampling_params = dict(sampling_params)
                 if rollout_base_seed is not None and not trajectory["validate"]:
-                    # Seed from the position within the generation batch (v0
-                    # semantics): each worker only sees a chunk of the batch, so
-                    # a chunk-local position would reuse the same seed offsets
-                    # in every worker and roll out duplicated noise.
-                    run_sampling_params["seed"] = _derive_rollout_seed(rollout_base_seed, prompt_index * n + session_id)
+                    # Run-wide prompt positions stay unique across refill chunks.
+                    run_sampling_params["seed"] = _derive_rollout_seed(
+                        rollout_base_seed, int(prompt.get("_rollout_seed_global_idx", prompt_index)) * n + session_id
+                    )
                 task = asyncio.create_task(
                     self._run_agent_loop(
                         run_sampling_params,
@@ -223,7 +225,16 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         # reward scoring can differ, so partition rows by field signature to keep
         # each put stackable.
         rows: dict[tuple[str, ...], list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
-        for session_id, internal in outputs:
+        art = getattr(getattr(self, "model_config", None), "algorithm", None) == "diffusion_art"
+        share_art_conditions = False
+        if art and not validate and self.model_config.architecture == "QwenImage21Pipeline":
+            engine_kwargs = {
+                key.replace("-", "_"): value
+                for key, value in (self.rollout_config.engine_kwargs.get("vllm_omni", {}) or {}).items()
+            }
+            share_art_conditions = int(engine_kwargs.get("max_num_seqs") or self.rollout_config.max_num_seqs) == 1
+        keep_art_media = art and bool(self.config.trainer.get("rollout_data_dir", None))
+        for row_index, (session_id, internal) in enumerate(outputs):
             # Diffusion single-turn agent loops produce one output per session.
             key = f"{uid}_{session_id}_0"
 
@@ -252,6 +263,8 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
 
             reward_extra_info = extra.get("reward_extra_info")
             extra_fields_out: dict[str, Any] = {}
+            if art:
+                extra_fields_out["response_shape"] = tuple(internal.response_diffusion_output.shape[1:])
             if "img_shapes" in extra:
                 extra_fields_out["img_shapes"] = extra["img_shapes"]
             if reward_extra_info is not None:
@@ -263,16 +276,34 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
                 media_value = extra.get(media_key)
                 if media_value is not None and not isinstance(media_value, torch.Tensor):
                     extra_fields_out[media_key] = media_value
+            if "art_cache" in extra:
+                # Keep the large trajectory separate from the lightweight
+                # envelope fetched again by metric/validation projections.
+                if not validate:
+                    field["art_cache"] = dict(extra["art_cache"])
+                    # Single-request rollout keeps the same condition layout for
+                    # every session of this prompt; store shared fields once.
+                    if share_art_conditions and row_index:
+                        for name in ("conditions", "timesteps", "sigmas", "dt"):
+                            field["art_cache"].pop(name)
+                # Use the serving version captured with the trajectory, rather
+                # than the trainer's version at request submission/completion.
+                step = int(extra["art_cache"]["policy_version"])
             extra_fields_out["min_global_steps"] = step
             extra_fields_out["max_global_steps"] = step
             field["extra_fields"] = extra_fields_out
+            if art and not validate and internal.reward_score is not None and not keep_art_media:
+                # Scoring already consumed pixels, text and dataset metadata.
+                # ART replay needs only its trajectory, scalar reward and uid.
+                field = {k: v for k, v in field.items() if k in {"uid", "rm_scores", "art_cache", "extra_fields"}}
+                extra_fields_out.pop("img_shapes", None)
 
             prompt_len = int(internal.prompt_ids.shape[-1])
             tag = {
                 "status": "success",
                 "prompt_len": prompt_len,
                 "response_len": 1,
-                "response_shape": tuple(int(dim) for dim in field["responses"].shape),
+                "response_shape": tuple(int(dim) for dim in internal.response_diffusion_output.shape[1:]),
                 "seq_len": prompt_len + 1,
                 "global_steps": step,
                 "min_global_steps": step,

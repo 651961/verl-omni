@@ -86,6 +86,53 @@ def test_v1_video_dump_reuses_shared_export_and_honors_max_samples(monkeypatch, 
     assert rows == [{"input": "first", "output": str(tmp_path / "7/0.mp4"), "gts": None, "score": 1.0, "step": 7}]
 
 
+@pytest.mark.parametrize("media_kind,channels", [("image", 3), ("image", 4), ("video", 3)])
+def test_ragged_media_logging_and_dump_remove_transport_padding(monkeypatch, tmp_path, media_kind, channels):
+    from PIL import Image
+
+    shapes = [(channels, 4, 6), (channels, 8, 8)] if media_kind == "image" else [(2, 3, 4, 6), (4, 3, 8, 8)]
+    outputs = torch.ones((2, *shapes[1]), dtype=torch.uint8)
+    exported = []
+
+    def export_video(video, path, **kwargs):
+        exported.append(tuple(video.shape))
+        assert kwargs["fps"] == 24
+
+    monkeypatch.setattr(ray_diffusion_trainer, "_export_video", export_video)
+    trainer = _trainer()
+    trainer._dump_generations(
+        ["a", "b"],
+        outputs,
+        [None, None],
+        [0.0, 1.0],
+        {},
+        str(tmp_path),
+        media_kind=media_kind,
+        response_shapes=shapes,
+    )
+    trainer._shutdown_dump_executor()
+    if media_kind == "video":
+        assert exported == shapes
+    else:
+        for index, shape in enumerate(shapes):
+            extension = "png" if channels == 4 else "jpg"
+            with Image.open(tmp_path / "1" / f"{index}.{extension}") as image:
+                assert image.size == (shape[-1], shape[-2])
+                assert image.mode == ("RGBA" if channels == 4 else "RGB")
+
+    logged = []
+    trainer.config = OmegaConf.create({"trainer": {"logger": [], "log_val_generations": 2}})
+    trainer.validation_generations_logger = SimpleNamespace(log=lambda _, rows, step: logged.extend(rows))
+    trainer._maybe_log_val_generations(
+        ["a", "b"],
+        outputs,
+        [0.0, 1.0],
+        media_kinds=[media_kind] * 2,
+        response_shapes=shapes,
+    )
+    assert {prompt: tuple(media.shape) for prompt, media, _ in logged} == dict(zip(["a", "b"], shapes, strict=True))
+
+
 def test_v1_background_dump_failure_is_logged_and_does_not_raise(monkeypatch, caplog, tmp_path):
     trainer = _trainer(global_steps=3)
 

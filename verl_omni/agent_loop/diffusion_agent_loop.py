@@ -351,7 +351,9 @@ class DiffusionAgentLoopWorker:
                 non_tensor_batch = {
                     **{k: np.array([v]) for k, v in kwargs.items()},
                     "__num_turns__": np.array([output.num_turns]),
-                    "tool_extra_fields": np.array([output.extra_fields], dtype=object),
+                    "tool_extra_fields": np.array(
+                        [{k: v for k, v in output.extra_fields.items() if k != "art_cache"}], dtype=object
+                    ),
                 }
 
                 data = DataProto(

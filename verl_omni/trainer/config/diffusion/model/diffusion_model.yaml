@@ -34,6 +34,10 @@ external_lib: null
 # whether to enable gradient checkpointing.
 enable_gradient_checkpointing: True
 
+# FSDP SAC: save these torch operator outputs during block checkpointing.
+# Empty keeps ordinary checkpointing; entries use namespace.operator.overload.
+gradient_checkpointing_save_ops: []
+
 # Optional model config path. If null, backends use <path>/<transformer_subfolder>.
 config_path: null
 
@@ -138,6 +142,12 @@ pipeline:
 
   # Reference-image resize short edge for compatible pipelines
   reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
+
+  # ART selected ODE steps.
+  art_step_indices: ${oc.select:actor_rollout_ref.rollout.pipeline.art_step_indices,null}
+
+  # Qwen-Image 2.1 target resolution budget.
+  output_resolution: ${oc.select:actor_rollout_ref.rollout.pipeline.output_resolution,1024}
 
   # Wan2.2 video number of frames
   num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
