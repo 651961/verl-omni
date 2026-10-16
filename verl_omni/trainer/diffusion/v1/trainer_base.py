@@ -1156,7 +1156,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
     def get_reward_handles(self):
         if self.enable_agent_reward_loop:
-            return self.reward_loop_manager.reward_loop_workers
+            return self.reward_loop_manager.reward_loop_worker_handles
         return None
 
     def _fetch_one_gen_batch(self):
