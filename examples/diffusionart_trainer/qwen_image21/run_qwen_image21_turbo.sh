@@ -43,7 +43,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.model.model_type=diffusion_art_model \
     actor_rollout_ref.model.algorithm=diffusion_art \
     actor_rollout_ref.model.attn_backend=native \
-    actor_rollout_ref.model.gradient_checkpointing_save_ops='[aten._scaled_dot_product_flash_attention.default,aten.mm.default]' \
+    actor_rollout_ref.model.gradient_checkpointing_save_ops='[aten._scaled_dot_product_flash_attention.default,transformer_blocks.*.img_mlp.out,transformer_blocks.*.attn.to_out.0,transformer_blocks.*.attn.to_q,transformer_blocks.*.attn.to_k,transformer_blocks.*.img_mlp.proj]' \
     actor_rollout_ref.model.use_regional_compile=false \
     actor_rollout_ref.model.lora_rank=0 \
     actor_rollout_ref.model.policy_state_adapters='[default]' \
@@ -57,7 +57,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     actor_rollout_ref.actor.optim.weight_decay=0.0001 \
     actor_rollout_ref.actor.optim.betas='[0.9,0.999]' \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=8 \
-    actor_rollout_ref.actor.fsdp_config.reshard_after_forward=false \
+    actor_rollout_ref.actor.fsdp_config.reshard_after_forward=true \
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=true \
     actor_rollout_ref.actor.fsdp_config.model_dtype=fp32 \
     actor_rollout_ref.actor.fsdp_config.mixed_precision.param_dtype=bf16 \
@@ -116,7 +116,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.logger='[console,tensorboard]' \
     trainer.project_name=diffusion_art \
     trainer.experiment_name=qwen_image21_turbo_async \
-    trainer.val_before_train=true \
+    trainer.val_before_train=false \
     trainer.rollout_data_dir=null \
     trainer.validation_data_dir=null \
     trainer.save_freq=20 \

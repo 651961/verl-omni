@@ -178,18 +178,38 @@ one sample per GPU. Each selected trajectory state contributes a forward/backwar
 before the optimizer update; 8 or 28 replay steps do **not** mean 8 or 28 independent
 optimizer updates. Gradient checkpointing adds block recomputation.
 
-Both recipes enable selective activation checkpointing (SAC) with
-`gradient_checkpointing_save_ops=[aten._scaled_dot_product_flash_attention.default]`
-to retain Flash Attention outputs while recomputing the rest of each block.
-To use ordinary checkpointing instead:
+Both recipes use selective activation checkpointing (SAC) to save Flash
+Attention outputs and five projections per block:
+
+```text
+gradient_checkpointing_save_ops=[aten._scaled_dot_product_flash_attention.default,transformer_blocks.*.img_mlp.out,transformer_blocks.*.attn.to_out.0,transformer_blocks.*.attn.to_q,transformer_blocks.*.attn.to_k,transformer_blocks.*.img_mlp.proj]
+```
+
+The Linear selectors save MLP down/up projections, attention output projection,
+and Q/K projection GEMMs. V, MLP gate projections, norms, RoPE, and elementwise operations
+remain eligible for recomputation. At 32,768 joint tokens, micro-batch 1, and BF16,
+the selected GEMM outputs across 32 blocks occupy 56 GiB; this is their output
+storage, not a prediction of the change in peak training memory. Joint tokens
+include text, condition images, and the target. Both recipes keep
+`reshard_after_forward=true` to release gathered parameters after forward.
+
+To retain only Flash Attention outputs, override the list with
+`[aten._scaled_dot_product_flash_attention.default]`. To use ordinary
+checkpointing instead, clear the list:
 
 ```bash
 bash examples/diffusionart_trainer/qwen_image21/run_qwen_image21_turbo.sh \
     actor_rollout_ref.model.gradient_checkpointing_save_ops='[]'
 ```
 
-The framework default is an empty list. Entries name registered
-`torch.ops` overloads; select the operators used by the actual attention backend.
+The framework list defaults to empty. Entries can name registered `torch.ops`
+overloads or case-sensitive glob patterns over full `named_modules()` paths.
+Each entry must resolve to a registered operator or match at least one
+`nn.Linear`; invalid names fail at model initialization. Matmul outputs inside selected
+Linear modules are cached, including biased projections. This mechanism is
+shared by FSDP diffusion models; MiniMax H3 uses `transformer_blocks.*.ff.net.2`
+for its MLP down-projection instead. Named Linear selection currently requires
+`use_regional_compile=false` and is unsupported by the VeOmni engine.
 The recipes target the segmented Flash Attention path used for unpadded
 Qwen Image 2.1 ART samples. Other attention paths need their own operator selection.
 SAC increases activation memory; measure peak memory and actor update time for

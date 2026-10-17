@@ -1,6 +1,6 @@
 # MiniMax H3 FL2VA and Ref2VA DiffusionART
 
-Last updated: 10/15/2026
+Last updated: 10/17/2026
 
 Full-parameter DiffusionART training for MiniMax H3 first/last-frame-to-audio-video
 (FL2VA) and reference-to-audio-video (Ref2VA) generation. The recipes use the V1
@@ -92,6 +92,29 @@ and replicated across nodes, with cross-node gradient synchronization:
 
 Set `ACTOR_NNODES=2 ROLLOUT_NNODES=2` for the 32-GPU layout. The default batch of
 8 prompts × 8 responses divides evenly across both 8 and 16 actor ranks.
+
+## Selective activation checkpointing
+
+The FSDP diffusion engine supports caching GEMMs by full Linear module path,
+using the same mechanism as Qwen Image 2.1. H3's MLP down-projection and attention
+output projection can be selected with a trailing override on either launcher:
+
+```bash
+bash examples/diffusionart_trainer/minimax_h3/run_minimax_h3_fl2va.sh \
+  actor_rollout_ref.model.gradient_checkpointing_save_ops='[transformer_blocks.*.ff.net.2,transformer_blocks.*.attn.to_out.0]'
+```
+
+These are case-sensitive glob patterns; each must match at least one `nn.Linear`.
+The selector caches matrix multiplication outputs inside those modules, leaving
+the other projections and norms eligible for recomputation. It does not select
+token-refiner projections. To also cache attention-core outputs, add the
+operator of the actual backend to this same list;
+Qwen's SDPA FlashAttention operator must not be assumed to match H3's FA2 backend.
+An empty list means ordinary block checkpointing. H3 launchers retain their
+existing behavior until the list is overridden. Named Linear selection
+requires `use_regional_compile=false` and is supported only by the FSDP engine.
+Measure peak memory and update time for the H3 sequence layout before adopting
+this optional configuration; Qwen's memory estimates do not apply to H3.
 
 ## Tests
 

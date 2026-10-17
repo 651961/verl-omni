@@ -87,7 +87,7 @@ class DiffusionModelConfig(BaseConfig):
 
     enable_gradient_checkpointing: bool = True
 
-    # FSDP SAC: torch operator overloads whose outputs are saved instead of recomputed.
+    # FSDP SAC: registered operator names or nn.Linear path globs whose outputs are saved.
     gradient_checkpointing_save_ops: list[str] = field(default_factory=list)
 
     attn_backend: str = "_flash_3_varlen_hub"

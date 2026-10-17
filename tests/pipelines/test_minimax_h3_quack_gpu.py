@@ -20,6 +20,8 @@ import pytest
 import torch
 from test_minimax_h3_quack_on_cpu import configure_adapter, h3, ops, tiny_model
 
+from verl_omni.utils.diffusion_checkpoint import enable_gradient_checkpointing
+
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for Quack kernels")
 
 
@@ -54,7 +56,7 @@ def test_real_h3_norm_dimensions_forward_backward(dim):
     torch.testing.assert_close(dy, original_dy, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("checkpointing", [False, True])
+@pytest.mark.parametrize("checkpointing", [False, True, "selective_linear"])
 def test_h3_video_audio_forward_backward_with_checkpointing(checkpointing, monkeypatch):
     torch.manual_seed(654)
     native = tiny_model().to(device="cuda", dtype=torch.bfloat16)
@@ -62,7 +64,12 @@ def test_h3_video_audio_forward_backward_with_checkpointing(checkpointing, monke
     candidate = copy.deepcopy(native)
     if checkpointing:
         native.enable_gradient_checkpointing()
-        candidate.enable_gradient_checkpointing()
+        enable_gradient_checkpointing(
+            candidate,
+            ["transformer_blocks.*.ff.net.2", "transformer_blocks.*.attn.to_out.0"]
+            if checkpointing == "selective_linear"
+            else [],
+        )
     inputs = {
         "hidden_states": torch.randn(1, 17, 16, device="cuda", dtype=torch.bfloat16),
         "audio_hidden_states": torch.randn(1, 11, 8, device="cuda", dtype=torch.bfloat16),

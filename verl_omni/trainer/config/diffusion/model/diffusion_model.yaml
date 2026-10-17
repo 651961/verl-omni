@@ -34,8 +34,9 @@ external_lib: null
 # whether to enable gradient checkpointing.
 enable_gradient_checkpointing: True
 
-# FSDP SAC: save these torch operator outputs during block checkpointing.
-# Empty keeps ordinary checkpointing; entries use namespace.operator.overload.
+# FSDP SAC: save registered operator outputs or GEMMs inside named nn.Linear modules.
+# Entries use namespace.operator.overload or full Linear path globs; empty keeps ordinary checkpointing.
+# Linear selectors require use_regional_compile=false; invalid operators/unmatched paths raise at model init.
 gradient_checkpointing_save_ops: []
 
 # Optional model config path. If null, backends use <path>/<transformer_subfolder>.

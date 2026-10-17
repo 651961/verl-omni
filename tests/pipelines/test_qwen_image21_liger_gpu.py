@@ -78,7 +78,7 @@ class _CountFlashAttention(TorchDispatchMode):
         return func(*args, **(kwargs or {}))
 
 
-@pytest.mark.parametrize("checkpointing", [False, True, "selective"])
+@pytest.mark.parametrize("checkpointing", [False, True, "selective", "selective_linear"])
 @pytest.mark.parametrize("padded", [False, True])
 def test_transformer_forward_backward_and_optimizer_step(checkpointing, padded, monkeypatch):
     torch.manual_seed(71)
@@ -86,8 +86,17 @@ def test_transformer_forward_backward_and_optimizer_step(checkpointing, padded, 
     candidate = copy.deepcopy(native)
     if checkpointing:
         native.enable_gradient_checkpointing()
-        save_ops = ["aten._scaled_dot_product_flash_attention.default"] if checkpointing == "selective" else []
-        enable_gradient_checkpointing(candidate, save_ops)
+        save_ops = (
+            ["aten._scaled_dot_product_flash_attention.default"]
+            if checkpointing in ("selective", "selective_linear")
+            else []
+        )
+        save_linears = (
+            ["transformer_blocks.*.img_mlp.out", "transformer_blocks.*.attn.to_out.0"]
+            if checkpointing == "selective_linear"
+            else []
+        )
+        enable_gradient_checkpointing(candidate, save_ops + save_linears)
     inputs = {
         "hidden_states": torch.randn(1, 16, 4, device="cuda", dtype=torch.bfloat16),
         "encoder_hidden_states": torch.randn(1, 8, 8, device="cuda", dtype=torch.bfloat16),
