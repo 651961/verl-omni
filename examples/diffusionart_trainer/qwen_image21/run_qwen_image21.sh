@@ -110,7 +110,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.nnodes="$ACTOR_NNODES" \
     trainer.logger='[console,tensorboard]' \
     trainer.project_name=diffusion_art \
-    trainer.experiment_name=qwen_image21_async \
+    trainer.experiment_name=qwen_image21 \
     trainer.val_before_train=true \
     trainer.rollout_data_dir=null \
     trainer.validation_data_dir=null \
