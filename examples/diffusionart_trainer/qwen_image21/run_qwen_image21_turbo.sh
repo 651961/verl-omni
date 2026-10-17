@@ -116,7 +116,7 @@ python3 -m verl_omni.trainer.main_diffusion_v1 \
     trainer.logger='[console,tensorboard]' \
     trainer.project_name=diffusion_art \
     trainer.experiment_name=qwen_image21_turbo_async \
-    trainer.val_before_train=false \
+    trainer.val_before_train=true \
     trainer.rollout_data_dir=null \
     trainer.validation_data_dir=null \
     trainer.save_freq=20 \
