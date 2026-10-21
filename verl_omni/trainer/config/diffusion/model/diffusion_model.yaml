@@ -34,6 +34,11 @@ external_lib: null
 # whether to enable gradient checkpointing.
 enable_gradient_checkpointing: True
 
+# FSDP SAC: save registered operator outputs or GEMMs inside named nn.Linear modules.
+# Entries use namespace.operator.overload or full Linear path globs; empty keeps ordinary checkpointing.
+# Linear selectors require use_regional_compile=false; invalid operators/unmatched paths raise at model init.
+gradient_checkpointing_save_ops: []
+
 # Optional model config path. If null, backends use <path>/<transformer_subfolder>.
 config_path: null
 
@@ -141,6 +146,9 @@ pipeline:
 
   # Reference-image resize short edge for compatible pipelines
   reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
+
+  # ART selected ODE steps.
+  art_step_indices: ${oc.select:actor_rollout_ref.rollout.pipeline.art_step_indices,null}
 
   # Wan2.2 video number of frames
   num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}

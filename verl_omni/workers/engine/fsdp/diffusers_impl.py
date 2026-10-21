@@ -65,6 +65,7 @@ from verl_omni.pipelines.utils import (
     prepare_model_inputs,
     prepare_noisy_latents,
 )
+from verl_omni.utils.diffusion_checkpoint import enable_gradient_checkpointing
 from verl_omni.utils.diffusion_compile import _maybe_compile_repeated_blocks
 from verl_omni.utils.fsdp_utils import apply_fsdp2
 from verl_omni.workers.config import DiffusionModelConfig
@@ -270,7 +271,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         return module
 
     def _configure_gradient_checkpointing(self, module):
-        module.enable_gradient_checkpointing()
+        enable_gradient_checkpointing(module, self.model_config.gradient_checkpointing_save_ops)
 
     def _build_module(self):
         from diffusers import AutoModel
@@ -365,7 +366,12 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             param_dtype,
             preserve_fp32_modules=preserve_fp32_modules,
         )
-        mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
+        mixed_precision = MixedPrecision(
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+            buffer_dtype=buffer_dtype,
+            cast_root_forward_inputs=model_cls.cast_forward_inputs(),
+        )
 
         auto_wrap_policy = get_fsdp_wrap_policy(
             module=module,
@@ -410,7 +416,9 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             # - ref: CPUOffloadPolicy(pin_memory=True)
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
             mp_policy = MixedPrecisionPolicy(
-                param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
+                param_dtype=param_dtype,
+                reduce_dtype=reduce_dtype,
+                cast_forward_inputs=model_cls.cast_forward_inputs(),
             )
             offload_policy = None
             if self.engine_config.offload_policy or self.engine_config.forward_only:
@@ -828,7 +836,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
         # "transformer." prefix keeps the names compatible with the rollout engine.
-        return export_lora_for_sync(
+        per_tensor_param, peft_config = export_lora_for_sync(
             self.module,
             model_config=self.model_config,
             base_sync_done=base_sync_done,
@@ -839,6 +847,14 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             adapter_context=lambda: self.use_adapter(adapter_name) if adapter_name is not None else nullcontext(),
             offload_fn=_offload_to_cpu,
         )
+        if not hasattr(getattr(self.module, "_fsdp_wrapped_module", self.module), "peft_config"):
+            sync_dtype = DiffusionModelBase.get_class(self.model_config).weight_sync_dtype()
+            if sync_dtype is not None:
+                per_tensor_param = (
+                    (name, param.to(sync_dtype) if param.is_floating_point() else param)
+                    for name, param in per_tensor_param
+                )
+        return per_tensor_param, peft_config
 
     def _prepare_timestep_staging(self, data: TensorDict, timesteps_key: str) -> tuple[dict[str, int], list[str]]:
         """Validate CPU inputs and describe the Qwen-Image fields consumed by each step."""
@@ -913,7 +929,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         each rank's shard against a pinned snapshot; non-LoRA base path only. Names
         match the full export (``convert_weight_keys`` plus the ``transformer.``
         prefix) so HF coordinates are what the rollout pipelines already load, and
-        the cast rule matches too (DTensors bf16, plain tensors native) so the
+        the cast rule matches the full export and adapter policy so the
         pinned diff base is bit-identical to the seed sync's full export.
         """
         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
@@ -935,17 +951,16 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
             offload_fsdp_model_to_cpu(self.module)
 
         device = get_device_id()
+        sync_dtype = DiffusionModelBase.get_class(self.model_config).weight_sync_dtype()
 
         def _gen():
             for name, param in params.items():
                 spec = ShardSpec.from_param(param)
                 p = param.to(device, non_blocking=True)
-                # Same cast rule as the full export: DTensors bf16, plain tensors
-                # native dtype. The pinned diff base must be bit-identical to what
-                # the seed (full) export sent the rollout, or steady deltas drift
-                # from the nccl path on FSDP1 / non-DTensor entries.
-                if isinstance(param, DTensor) and p.is_floating_point():
-                    p = p.to(torch.bfloat16, non_blocking=True)
+                # Delta snapshots must match the seed full publication exactly.
+                dtype = torch.bfloat16 if isinstance(param, DTensor) else sync_dtype
+                if dtype is not None and p.is_floating_point():
+                    p = p.to(dtype, non_blocking=True)
                 local = p.to_local() if hasattr(p, "to_local") else p
                 yield f"transformer.{name}", local.reshape(-1), spec
 
@@ -981,6 +996,10 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
 
         return FSDPEngine._gradient_sync_context(self, is_last_micro_batch=is_last_micro_batch)
 
+    def _prepare_microbatch_transport(self, micro_batch):
+        """Prepare CPU transport fields before copying a microbatch to the device."""
+        return micro_batch
+
     def _run_forward_backward_batch(
         self,
         data: TensorDict,
@@ -1010,6 +1029,7 @@ class DiffusersFSDPEngine(LoRAAdapterMixin, BaseEngine, ABC):
         n_micro = len(micro_batches)
 
         for micro_idx, micro_batch in enumerate(micro_batches):
+            micro_batch = self._prepare_microbatch_transport(micro_batch)
             tu.assign_non_tensor(micro_batch, gradient_accumulation_steps=gradient_accumulation_steps)
             if stage_inputs:
                 shared_batch = micro_batch.select(*shared_keys, strict=False).to(get_device_id())
@@ -1375,6 +1395,10 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
         super().__init__(model_config, engine_config, optimizer_config, checkpoint_config)
 
     def _configure_gradient_checkpointing(self, module):
+        if self.model_config.gradient_checkpointing_save_ops:
+            raise ValueError(
+                "Selective activation checkpointing is not supported by the NFT engine checkpoint wrapper."
+            )
         DiffusionModelBase.get_class(self.model_config).configure_gradient_checkpointing(module, self.engine_config)
 
     def forward_backward_batch(
@@ -1503,6 +1527,87 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
             "metrics": metrics,
         }
         return loss, output
+
+
+@EngineRegistry.register(model_type="diffusion_art_model", backend=["fsdp", "fsdp2"], device=["cuda"])
+class ARTDiffusersFSDPEngine(DiffusersFSDPEngine):
+    """One current-policy forward/backward per cached ODE state (two with CFG)."""
+
+    def _build_optimizer(self, module):
+        if any(p.dtype != torch.float32 for p in module.parameters() if p.requires_grad):
+            raise ValueError("ART requires FP32 master parameters before Adam initialization.")
+        return super()._build_optimizer(module)
+
+    def _prepare_microbatch_transport(self, micro_batch):
+        output_tokens = micro_batch["art_states"].shape[2]
+        trimmed = DiffusionModelBase.get_class(self.model_config).trim_art_transport(micro_batch)
+        tu.assign_non_tensor(trimmed, art_output_token_count=output_tokens)
+        return trimmed
+
+    def _prepare_timestep_staging(self, data, timesteps_key):
+        step_fields = dict.fromkeys(
+            ("art_states", "art_old_velocities", "art_timesteps", "art_sigmas", "art_dt", "art_ref_predictions"), 1
+        )
+        step_fields = {k: v for k, v in step_fields.items() if k in data}
+        steps = data[timesteps_key].shape[1]
+        for key in step_fields:
+            if data[key].shape[1] != steps or data[key].device.type != "cpu" or data[key].requires_grad:
+                raise ValueError(f"ART staging requires detached CPU tensors with a consistent step dimension: {key}.")
+        shared_keys = [k for k in data.keys() if k.startswith("art_") and k not in step_fields]
+        # _run_forward_backward_batch assigns these after staging setup.
+        shared_keys += ["gradient_accumulation_steps", "sp_size", "art_output_token_count"]
+        return step_fields, shared_keys
+
+    def forward_backward_batch(self, data, loss_function, forward_only=False):
+        """Replay captured steps with gradients enabled only for training."""
+        # Optional inference imports can disable autograd on the worker thread.
+        with torch.set_grad_enabled(not forward_only):
+            return self._run_forward_backward_batch(data, loss_function, forward_only, timesteps_key="art_timesteps")
+
+    def prepare_model_inputs(self, micro_batch, step):
+        return DiffusionModelBase.get_class(self.model_config).prepare_art_inputs(micro_batch, step)
+
+    def prepare_model_outputs(self, output, micro_batch):
+        return {"current_velocity": output}
+
+    def forward_step(self, micro_batch, loss_function, forward_only, step):
+        model_cls = DiffusionModelBase.get_class(self.model_config)
+        prediction, state = model_cls.forward_art_velocity(self.module, micro_batch, step)
+        n = state.shape[1]
+        model_output = self.prepare_model_outputs(prediction, micro_batch)
+        if loss_function is None:
+            if not forward_only:
+                raise ValueError("ART training requires a loss function.")
+            # Each original layout was trimmed. Pad only the returned reference
+            # prediction to permit concatenation across heterogeneous microbatches.
+            output_tokens = tu.get_non_tensor_data(micro_batch, "art_output_token_count", default=None)
+            padded = torch.nn.functional.pad(prediction, (0, 0, 0, output_tokens - n))
+            model_output = {"noise_pred": padded}
+            loss, metrics = prediction.new_zeros(()), {}
+        else:
+            sigma, dt = model_cls.art_loss_coefficients(micro_batch, step)
+            fields = {
+                "old_velocity": micro_batch["art_old_velocities"][:, step, :n],
+                "state": state,
+                "sigma": sigma,
+                "dt": dt,
+                "direction": micro_batch["art_directions"][:, :n],
+                "magnitude": micro_batch["art_magnitudes"],
+            }
+            if "art_feature_group_sizes" in micro_batch:
+                fields["feature_group_sizes"] = micro_batch["art_feature_group_sizes"]
+            if "art_ref_predictions" in micro_batch:
+                fields["reference_prediction"] = micro_batch["art_ref_predictions"][:, step, :n]
+            data = tu.get_tensordict(fields)
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=None
+                ),
+                sp_size=1,
+            )
+            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+        return loss, {"model_output": model_output, "loss": loss.detach().item(), "metrics": metrics}
 
 
 class EngineEvalModeCtx(BaseEngineCtx):

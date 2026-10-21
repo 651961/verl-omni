@@ -155,6 +155,7 @@ def test_fetch_one_gen_batch_stamps_monotonic_gen_batch_seq():
             ]
         ),
         _gen_batch_seq=0,
+        _rollout_seed_offset=0,
     )
 
     first = trainer_base_module.PolicyGradientDiffusionTrainerV1._fetch_one_gen_batch(trainer)

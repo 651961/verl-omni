@@ -54,6 +54,13 @@ class DiffusionLossConfig(BaseConfig):
     video_ref_kl_coef: float = 0.0
     audio_ref_kl_coef: float = 0.0
 
+    # Overrides for the ART velocity objective.
+    art_loss_options: dict = field(default_factory=dict)
+    # Complete-prompt covariance and zero-signal handling.
+    art_covariance_options: dict = field(default_factory=lambda: {"zero_signal_mode": "exact"})
+    # Restore zero-guidance ART samples toward their cached rollout predictions.
+    art_restore_zero_signal: bool = True
+
     def __post_init__(self):
         """Validate diffusion loss configuration."""
         valid_modes = [
@@ -62,6 +69,7 @@ class DiffusionLossConfig(BaseConfig):
             "grpo_guard",
             "diffusion_nft",
             "omni_nft",
+            "diffusion_art",
             "dgpo",
             "dpo",
             "dmd2",

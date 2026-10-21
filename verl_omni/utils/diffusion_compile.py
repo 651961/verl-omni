@@ -54,6 +54,8 @@ def _maybe_compile_repeated_blocks(
     """Regionally compile repeated diffusion blocks before FSDP2 mutates them."""
     if not model_config.use_regional_compile:
         return
+    if module.__dict__.get("_sac_linear_hooks"):
+        raise ValueError("Named Linear SAC selection requires model.use_regional_compile=False.")
     if engine_config.strategy == "fsdp":
         raise NotImplementedError(
             "Diffusion regional torch.compile does not yet support FSDP1 because that integration has not "

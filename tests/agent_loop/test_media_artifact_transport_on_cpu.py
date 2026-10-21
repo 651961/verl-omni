@@ -20,6 +20,7 @@ import torch
 
 from verl_omni.agent_loop.diffusion_agent_loop import DiffusionAgentLoopWorker
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.pipelines.rollout_media import MediaArtifact, MediaSpec, artifact_fields, previews_from_batch
 from verl_omni.reward_loop.reward_manager.visual import _reward_extra_info
 from verl_omni.trainer.diffusion.v1 import tq_utils
@@ -60,6 +61,8 @@ async def test_named_media_survives_to_preview_and_reward_consumers(monkeypatch,
         data = worker._postprocess(internals)
     else:
         worker = object.__new__(DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class)
+        worker.model_adapter = DiffusionModelBase
+        worker.config = SimpleNamespace(trainer={})
         stored = {}
 
         async def put(*, keys, fields, **kwargs):
@@ -92,3 +95,28 @@ def test_named_scorers_reject_missing_stream_instead_of_legacy_fallback():
         _get_audio({"media_artifacts": {}, "audio": torch.ones(16), "audio_sample_rate": 32000})
     with pytest.raises(ValueError, match="decoded video"):
         _to_tchw(MediaArtifact(MediaSpec("video", "latent", "CTHW"), torch.zeros(16, 3, 2, 2)))
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_tq_ragged_video_preview_retains_exact_frames(monkeypatch, nested):
+    from verl_omni.pipelines.rollout_media import ARTIFACT_PREFIX
+
+    videos = [torch.full((frames, 3, 2, 2), frames, dtype=torch.uint8) for frames in (3, 5)]
+    rows = []
+    for video in videos:
+        artifact = MediaArtifact(MediaSpec("video", "decoded", "TCHW", fps=24), video)
+        rows.append(artifact_fields({"video_preview": artifact}, "video_preview", "video_preview"))
+    key = ARTIFACT_PREFIX + "video_preview"
+    fields = {
+        key: torch.nested.nested_tensor(videos) if nested else videos,
+        "responses": videos,
+        "extra_fields": [{k: v for k, v in row.items() if k != key} for row in rows],
+    }
+    monkeypatch.setattr(tq_utils.tq, "kv_batch_get", lambda **kwargs: fields)
+    data = tq_utils.diffusion_tq_batch_to_dataproto(SimpleNamespace(keys=["a_0_0", "b_0_0"], partition_id="val"))
+    previews = previews_from_batch(data)
+    assert [preview.data.shape[0] for preview in previews] == [3, 5]
+    for index, video in enumerate(videos):
+        torch.testing.assert_close(previews[index].data, video)
+        extra = _reward_extra_info(data[index])
+        torch.testing.assert_close(extra["media_artifacts"]["video_preview"].data, video)

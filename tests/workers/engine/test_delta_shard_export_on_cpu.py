@@ -62,6 +62,8 @@ def _make_engine(module) -> PPODiffusersFSDPEngine:
     # DiffusionModelConfig.__post_init__ does I/O; set the field under test directly.
     model_config = object.__new__(DiffusionModelConfig)
     object.__setattr__(model_config, "lora", {})
+    object.__setattr__(model_config, "architecture", "QwenImagePipeline")
+    object.__setattr__(model_config, "algorithm", "flow_grpo")
     engine.model_config = model_config
     return engine
 

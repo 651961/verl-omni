@@ -15,6 +15,7 @@
 
 import ast
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -25,7 +26,7 @@ from pathlib import Path
 import diffusers
 import pytest
 import torch
-from model_fixtures import run_forward, tiny_pipeline, tiny_transformer
+from model_fixtures import ARCHITECTURES, CONFIGS, run_forward, tiny_pipeline, tiny_transformer
 
 from verl_omni.model_merger import ModelMergerConfig, merge_model, validate_artifact
 from verl_omni.model_merger.architectures import _PIPELINES, _TRANSFORMERS
@@ -92,10 +93,7 @@ def _h3_native_state(model):
             result[target] = torch.cat([gate, up], dim=0)
         else:
             result[target] = values[0]
-    rope_len = model.config.rope_freq_dim
-    result["rope.inv_freq"] = model.config.rope_theta ** (
-        -(torch.arange(0, 2 * rope_len, 2, dtype=torch.float32) / (2 * rope_len))
-    )
+    result["rope.inv_freq"] = model.rope.inv_freq.detach().clone()
     return result
 
 
@@ -124,7 +122,8 @@ def _h3_pipeline_case(tmp_path):
     for name in components:
         root = base / name
         root.mkdir()
-        write_json(root / "config.json", {"_class_name": components[name][1]})
+        filename = "preprocessor_config.json" if name == "processor" else "config.json"
+        write_json(root / filename, {"_class_name": components[name][1]})
     write_json(base / "tokenizer/tokenizer_config.json", {"tokenizer_class": "Qwen2TokenizerFast"})
     write_json(
         base / "model_index.json",
@@ -159,6 +158,8 @@ def _h3_pipeline_case(tmp_path):
 
 
 def _case(tmp_path, architecture, pipeline=False, dual_wan=False):
+    if architecture == "QwenImage21Pipeline" and architecture not in ARCHITECTURES:
+        pytest.skip("QwenImage21 requires a newer Diffusers runtime")
     if architecture == "BooguImagePipeline":
         pytest.importorskip("boogu", reason="Install the optional boogu-image package to test its canonical class")
     model = tiny_transformer(architecture)
@@ -195,7 +196,7 @@ def _case(tmp_path, architecture, pipeline=False, dual_wan=False):
 def dtensor_sources(tmp_path_factory):
     root = tmp_path_factory.mktemp("architecture-dtensors")
     sources = {}
-    for architecture in _TRANSFORMERS:
+    for architecture in ARCHITECTURES:
         if architecture == "BooguImagePipeline" and importlib.util.find_spec("boogu") is None:
             continue
         config, _ = _case(root / architecture, architecture)
@@ -214,7 +215,7 @@ def dtensor_sources(tmp_path_factory):
 
 
 @pytest.mark.parametrize("layout", ["single", "dtensor"])
-@pytest.mark.parametrize("architecture", sorted(_TRANSFORMERS))
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
 def test_all_components_reload_and_forward(tmp_path, architecture, layout, request):
     config, model = _case(tmp_path, architecture)
     if layout == "dtensor":
@@ -249,8 +250,32 @@ def test_all_pipelines_reload_and_forward(tmp_path, architecture):
     assert validate_artifact(result.output_dir)["trained_components"] == ["transformer"]
 
 
-def test_all_tiny_models_train_one_step_save_with_fsdp2_and_merge(tmp_path):
-    architectures = sorted(_TRANSFORMERS)
+@pytest.mark.parametrize("sigmas", [[], ["diffusers", "EulerDiscreteScheduler"], [True], [float("inf")]])
+def test_qwen21_rejects_invalid_sample_sigmas(tmp_path, sigmas):
+    config, _ = _case(tmp_path, "QwenImage21Pipeline", pipeline=True)
+    path = Path(config.base_model) / "model_index.json"
+    index = read_json(path)
+    index["sample_sigmas"] = sigmas
+    path.write_text(json.dumps(index), encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid pipeline option: sample_sigmas"):
+        merge_model(config)
+    assert not Path(config.target_dir).exists()
+
+
+def test_qwen21_pipeline_without_fixed_sigmas(tmp_path):
+    config, _ = _case(tmp_path, "QwenImage21Pipeline", pipeline=True)
+    path = Path(config.base_model) / "model_index.json"
+    index = read_json(path)
+    index["sample_sigmas"] = None
+    write_json(path, index)
+    result = merge_model(config)
+    loaded = diffusers.QwenImage21Pipeline.from_pretrained(result.output_dir, local_files_only=True)
+    assert loaded.config.sample_sigmas is None
+
+
+@pytest.mark.parametrize("hsdp", [False, True], ids=["fsdp", "hsdp"])
+def test_all_tiny_models_train_one_step_save_with_fsdp2_and_merge(tmp_path, hsdp):
+    architectures = ARCHITECTURES.copy()
     if importlib.util.find_spec("boogu") is None:
         architectures.remove("BooguImagePipeline")
     cases = {}
@@ -283,11 +308,12 @@ def test_all_tiny_models_train_one_step_save_with_fsdp2_and_merge(tmp_path):
             "-m",
             "torch.distributed.run",
             "--standalone",
-            "--nproc_per_node=2",
+            f"--nproc_per_node={4 if hsdp else 2}",
             str(Path(__file__).with_name("fsdp2_tiny_train_checkpoint.py")),
             str(tmp_path),
             *architectures,
-        ],
+        ]
+        + (["--fsdp-size", "2"] if hsdp else []),
         env=env,
         capture_output=True,
         text=True,
@@ -397,7 +423,7 @@ def test_wan_exports_both_transformers_without_a_component_choice(tmp_path):
     assert validate_artifact(result.output_dir)["tensor_directory"] == "transformer"
 
 
-@pytest.mark.parametrize("architecture", sorted(_TRANSFORMERS))
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
 def test_every_architecture_rejects_partial_checkpoint(tmp_path, architecture):
     config, model = _case(tmp_path, architecture)
     state = dict(model.state_dict())
@@ -419,8 +445,12 @@ def test_architecture_is_inferred_and_conflicting_base_fails(tmp_path):
 
 
 @pytest.mark.parametrize("layout", ["single", "dtensor"])
-def test_minimax_h3_native_pipeline_conversion_is_complete(tmp_path, layout, request):
+@pytest.mark.parametrize("processor_config", ["preprocessor_config.json", "processor_config.json"])
+def test_minimax_h3_native_pipeline_conversion_is_complete(tmp_path, layout, processor_config, request):
     config, model = _h3_pipeline_case(tmp_path)
+    processor = Path(config.base_model) / "processor"
+    if processor_config != "preprocessor_config.json":
+        (processor / "preprocessor_config.json").rename(processor / processor_config)
     if layout == "dtensor":
         config = replace(config, local_dir=str(request.getfixturevalue("dtensor_sources")["MiniMaxH3Pipeline"]))
     expected = _h3_native_state(model)
@@ -452,8 +482,36 @@ def test_minimax_h3_native_pipeline_conversion_is_complete(tmp_path, layout, req
     up, gate = source["transformer_blocks.0.ff.net.0.proj.weight"].split(model.config.ffn_dim, dim=0)
     torch.testing.assert_close(actual["blocks.0.mlp.fc1.weight"], torch.cat([gate, up]), rtol=0, atol=0)
     assert _h3_native_name("transformer_blocks.0.attn.to_out.0.weight") == "blocks.0.attn.out_proj.weight"
-    for component in ("text_encoder", "tokenizer", "video_vae", "audio_vae", "processor"):
+    for component in ("text_encoder", "tokenizer", "video_vae", "audio_vae"):
         assert (result.output_dir / component / "config.json").is_file()
+    assert (result.output_dir / "processor" / processor_config).read_bytes() == (
+        processor / processor_config
+    ).read_bytes()
+
+
+def test_minimax_h3_rejects_missing_processor_config(tmp_path):
+    config, _ = _h3_pipeline_case(tmp_path)
+    processor = Path(config.base_model) / "processor"
+    (processor / "preprocessor_config.json").unlink()
+    write_json(processor / "config.json", {"model_type": "qwen3_vl"})
+    with pytest.raises(ValueError, match="Missing MiniMax H3 component: processor"):
+        merge_model(config)
+    assert not Path(config.target_dir).exists()
+
+
+def test_minimax_h3_native_rope_matches_actor_frequencies(tmp_path, monkeypatch):
+    from safetensors import safe_open
+
+    monkeypatch.setitem(
+        CONFIGS,
+        "MiniMaxH3Pipeline",
+        {**CONFIGS["MiniMaxH3Pipeline"], "attention_head_dim": 128, "rope_freq_dim": 16},
+    )
+    config, model = _h3_pipeline_case(tmp_path)
+    result = merge_model(config)
+    mapping = weight_files(result.output_dir / "transformer", "model.safetensors")
+    with safe_open(mapping["rope.inv_freq"], framework="pt", device="cpu") as weights:
+        torch.testing.assert_close(weights.get_tensor("rope.inv_freq"), model.rope.inv_freq, rtol=0, atol=0)
 
 
 def test_minimax_h3_custom_assets_require_explicit_trust(tmp_path):
@@ -474,7 +532,7 @@ def test_component_export_from_pipeline_does_not_copy_other_assets(tmp_path):
     assert not (result.output_dir / "model_index.json").exists()
 
 
-@pytest.mark.parametrize("architecture", sorted(_TRANSFORMERS))
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
 def test_every_architecture_dtype_policy_and_fp32_islands(tmp_path, architecture):
     from safetensors.torch import load_file
 

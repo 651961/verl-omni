@@ -33,6 +33,7 @@ from verl.utils.profiler import simple_timer
 from verl.workers.rollout.llm_server import LLMServerClient
 
 from verl_omni.agent_loop.utils import maybe_per_rollout_seeds
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
 
 
@@ -157,6 +158,7 @@ class DiffusionAgentLoopWorker:
         model_config = config.actor_rollout_ref.model
         self.rollout_config: DiffusionRolloutConfig = omega_conf_to_dataclass(rollout_config)
         self.model_config: DiffusionModelConfig = omega_conf_to_dataclass(model_config)
+        self.model_adapter = DiffusionModelBase.get_class(self.model_config)
 
         if not hasattr(self, "server_manager"):
             self.server_manager = llm_client
@@ -275,7 +277,7 @@ class DiffusionAgentLoopWorker:
             hf_model_type=self.hf_model_type,
             extra_tokenizer_map=self.model_config.extra_tokenizer_map,
         )
-        output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+        output: DiffusionAgentLoopOutput = await agent_loop.run(sampling_params, validate=validate, **kwargs)
         return await self._agent_loop_postprocess(output, validate=validate, **kwargs)
 
     async def _agent_loop_postprocess(
@@ -351,7 +353,9 @@ class DiffusionAgentLoopWorker:
                 non_tensor_batch = {
                     **{k: np.array([v]) for k, v in kwargs.items()},
                     "__num_turns__": np.array([output.num_turns]),
-                    "tool_extra_fields": np.array([output.extra_fields], dtype=object),
+                    "tool_extra_fields": np.array(
+                        [self.model_adapter.reward_extra_fields(output.extra_fields)], dtype=object
+                    ),
                 }
 
                 data = DataProto(

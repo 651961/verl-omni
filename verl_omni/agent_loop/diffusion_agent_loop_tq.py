@@ -140,11 +140,10 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             for session_id in range(n):
                 run_sampling_params = dict(sampling_params)
                 if rollout_base_seed is not None and not trajectory["validate"]:
-                    # Seed from the position within the generation batch (v0
-                    # semantics): each worker only sees a chunk of the batch, so
-                    # a chunk-local position would reuse the same seed offsets
-                    # in every worker and roll out duplicated noise.
-                    run_sampling_params["seed"] = derive_rollout_seed(rollout_base_seed, prompt_index * n + session_id)
+                    # Run-wide prompt positions stay unique across refill chunks.
+                    run_sampling_params["seed"] = derive_rollout_seed(
+                        rollout_base_seed, int(prompt.get("_rollout_seed_global_idx", prompt_index)) * n + session_id
+                    )
                 task = asyncio.create_task(
                     self._run_agent_loop(
                         run_sampling_params,
@@ -224,7 +223,7 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
         # reward scoring can differ, so partition rows by field signature to keep
         # each put stackable.
         rows: dict[tuple[str, ...], list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
-        for session_id, internal in outputs:
+        for row_index, (session_id, internal) in enumerate(outputs):
             # Diffusion single-turn agent loops produce one output per session.
             key = f"{uid}_{session_id}_0"
 
@@ -274,17 +273,21 @@ class DiffusionAgentLoopWorkerTQ(DiffusionAgentLoopWorker):
             extra_fields_out["min_global_steps"] = step
             extra_fields_out["max_global_steps"] = step
             field["extra_fields"] = extra_fields_out
+            field = self.model_adapter.prepare_rollout_row(
+                field, extra, row_index=row_index, validate=validate, config=self.config
+            )
+            sample_step = field["extra_fields"]["min_global_steps"]
 
             prompt_len = int(internal.prompt_ids.shape[-1])
             tag = {
                 "status": "success",
                 "prompt_len": prompt_len,
                 "response_len": 1,
-                "response_shape": tuple(int(dim) for dim in field["responses"].shape),
+                "response_shape": tuple(int(dim) for dim in internal.response_diffusion_output.shape[1:]),
                 "seq_len": prompt_len + 1,
-                "global_steps": step,
-                "min_global_steps": step,
-                "max_global_steps": step,
+                "global_steps": sample_step,
+                "min_global_steps": sample_step,
+                "max_global_steps": field["extra_fields"]["max_global_steps"],
             }
             # Identity of the prompt group for the trainer's v0 prompt-major
             # row reordering: position inside its generation batch plus the

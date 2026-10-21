@@ -74,6 +74,19 @@ def _validate_visual_response(response_visual, config, *, is_validate: bool, ext
         raise ValueError(f"Expected uint8 pixel responses for output_type={output_type!r}, got {dtype}.")
 
 
+def _visual_response(data_item):
+    """Remove transport padding using the rollout's original response shape."""
+    response = data_item.batch["responses"]
+    shape = data_item.non_tensor_batch.get("response_shape")
+    if shape is None:
+        return response
+    if len(shape) != response.ndim or any(
+        size < 1 or size > limit for size, limit in zip(shape, response.shape, strict=True)
+    ):
+        raise ValueError(f"Invalid rollout response_shape {shape} for padded response {tuple(response.shape)}.")
+    return response[tuple(slice(0, size) for size in shape)]
+
+
 class VisualRewardManager(RewardManagerBase):
     """The reward manager for visual response."""
 
@@ -97,7 +110,7 @@ class VisualRewardManager(RewardManagerBase):
     async def run_single(self, data: DataProto) -> dict:
         assert len(data) == 1, "Only support single data item"
         data_item = data[0]
-        response_visual = data_item.batch["responses"]
+        response_visual = _visual_response(data_item)
         data_source = data_item.non_tensor_batch["data_source"]
         ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
         extra_info = _reward_extra_info(data_item)

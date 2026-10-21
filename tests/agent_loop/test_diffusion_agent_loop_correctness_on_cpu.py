@@ -33,6 +33,7 @@ from verl_omni.agent_loop.diffusion_agent_loop import (
 )
 from verl_omni.agent_loop.diffusion_agent_loop_tq import DiffusionAgentLoopWorkerTQ
 from verl_omni.agent_loop.single_turn_agent_loop import DiffusionSingleTurnAgentLoop
+from verl_omni.pipelines.model_base import DiffusionModelBase
 from verl_omni.trainer.diffusion.v1 import tq_utils
 
 
@@ -51,6 +52,7 @@ class _FakeRewardLoopWorkerHandle:
 
 
 class _DummyDiffusionAgentLoopWorker:
+    model_adapter = DiffusionModelBase
     _compute_score = DiffusionAgentLoopWorker._compute_score
 
     def __init__(self, reward_loop_worker_handle: _FakeRewardLoopWorkerHandle):
@@ -244,6 +246,8 @@ def test_reference_row_padding_rejects_invalid_inputs(value, count, target_lengt
 async def test_tq_writer_preserves_allowlisted_non_tensor_trajectory_metadata(monkeypatch):
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
+    worker.model_adapter = DiffusionModelBase
+    worker.config = SimpleNamespace()
     captured = {}
     img_shapes = [(1, 32, 32), (1, 64, 64)]
     internal = SimpleNamespace(
@@ -295,6 +299,8 @@ async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch):
     """All of a prompt's session rows must land in a single batched TQ put."""
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
+    worker.model_adapter = DiffusionModelBase
+    worker.config = SimpleNamespace()
     worker.rollout_config = SimpleNamespace(n=2, val_kwargs=SimpleNamespace(n=2))
 
     def make_output(*, with_log_probs: bool):
@@ -344,6 +350,8 @@ async def test_run_prompt_batches_prompt_group_into_one_put(monkeypatch):
 async def test_tq_writer_batches_group_sessions_and_partitions_field_sets(monkeypatch):
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
+    worker.model_adapter = DiffusionModelBase
+    worker.config = SimpleNamespace()
     puts = []
 
     def make_internal(with_reward: bool):
@@ -418,6 +426,8 @@ def test_tq_batch_restores_non_tensor_trajectory_metadata(monkeypatch):
 async def test_run_prompt_publishes_failure_after_siblings_settle(monkeypatch):
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
+    worker.model_adapter = DiffusionModelBase
+    worker.config = SimpleNamespace()
     worker.rollout_config = SimpleNamespace(n=2, val_kwargs=SimpleNamespace(n=2))
     lifecycle = []
 
@@ -467,6 +477,9 @@ async def test_generate_sequences_seeds_from_global_prompt_index(monkeypatch):
     """
     worker_cls = DiffusionAgentLoopWorkerTQ.__ray_metadata__.modified_class
     worker = object.__new__(worker_cls)
+    worker.model_adapter = DiffusionModelBase
+    worker.config = SimpleNamespace()
+    worker.model_config = SimpleNamespace(algorithm="flow_grpo")
     worker.background_tasks = set()
     worker.rollout_config = SimpleNamespace(
         n=2,

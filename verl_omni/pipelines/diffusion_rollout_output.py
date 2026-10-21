@@ -148,34 +148,35 @@ def wrap_rollout_postprocessor(postprocess: Callable[..., Any]) -> Callable[...,
         Processor that bypasses named artifacts and preserves training metadata.
     """
 
-    @functools.wraps(postprocess)
-    def wrapped(data: Any, **kwargs: Any) -> Any:
-        if not _is_envelope(data):
-            return postprocess(data, **kwargs)
+    return functools.update_wrapper(functools.partial(_postprocess_rollout_output, postprocess), postprocess)
 
-        payload = data["payload"]
-        metadata = dict(data.get("metadata") or {})
-        if "media_artifacts" in metadata:
-            return data  # Named tensors are already decoded/normalized by the adapter.
-        if not payload:
-            return data  # Token-only metadata has no media for the native processor.
-        if len(payload) != 1:
-            raise ValueError("A media-only postprocessor cannot consume multiple payload keys; use named artifacts.")
-        (media_key,) = payload
-        if media_key not in _MEDIA_KEYS:
-            raise ValueError("Diffusion output envelope has no media payload.")
 
-        processed = postprocess(payload[media_key], **kwargs)
-        if _is_envelope(processed):
-            return {
-                "payload": dict(processed["payload"]),
-                "metadata": {**dict(processed.get("metadata") or {}), **metadata},
-            }
-        if isinstance(processed, Mapping):
-            return {"payload": dict(processed), "metadata": metadata}
-        return {"payload": {media_key: processed}, "metadata": metadata}
+def _postprocess_rollout_output(postprocess: Callable[..., Any], data: Any, **kwargs: Any) -> Any:
+    """Keep the callable importable when native outputs cross process boundaries."""
+    if not _is_envelope(data):
+        return postprocess(data, **kwargs)
 
-    return wrapped
+    payload = data["payload"]
+    metadata = dict(data.get("metadata") or {})
+    if "media_artifacts" in metadata:
+        return data  # Named tensors are already decoded/normalized by the adapter.
+    if not payload:
+        return data  # Token-only metadata has no media for the native processor.
+    if len(payload) != 1:
+        raise ValueError("A media-only postprocessor cannot consume multiple payload keys; use named artifacts.")
+    (media_key,) = payload
+    if media_key not in _MEDIA_KEYS:
+        raise ValueError("Diffusion output envelope has no media payload.")
+
+    processed = postprocess(payload[media_key], **kwargs)
+    if _is_envelope(processed):
+        return {
+            "payload": dict(processed["payload"]),
+            "metadata": {**dict(processed.get("metadata") or {}), **metadata},
+        }
+    if isinstance(processed, Mapping):
+        return {"payload": dict(processed), "metadata": metadata}
+    return {"payload": {media_key: processed}, "metadata": metadata}
 
 
 def install_rollout_postprocessor(module: ModuleType, factory_name: str) -> None:

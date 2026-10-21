@@ -14,6 +14,7 @@
 """Publish complete, audited Diffusers transformers with unchanged base components."""
 
 import inspect
+import math
 import os
 import shutil
 from collections.abc import Iterator, Mapping
@@ -156,7 +157,7 @@ def model_rank_files(root: Path) -> list[Path]:
 def _local_tensor(value: torch.Tensor) -> torch.Tensor:
     local = value.to_local() if isinstance(value, DTensor) else value
     if type(local) is not torch.Tensor:
-        raise ValueError("Only plain tensors and one-dimensional DTensors are supported; ShardedTensor is unsupported")
+        raise ValueError("Only plain tensors and DTensors are supported; ShardedTensor is unsupported")
     if local.device.type != "cpu" or local.layout != torch.strided or local.is_quantized or local.is_complex():
         raise ValueError("Expected a dense, real, non-quantized CPU tensor")
     if local.is_floating_point() and not torch.isfinite(local).all():
@@ -182,11 +183,17 @@ def reconstruct_tensor(values: list[torch.Tensor], shape: tuple[int, ...]) -> to
     first = values[0]
     mesh = first.device_mesh.mesh
     placements = first.placements
-    if mesh.ndim != 1 or len(placements) != 1 or sorted(mesh.tolist()) != list(range(len(values))):
-        raise ValueError("Only a one-dimensional FSDP mesh covering every rank is supported")
     if first.device_mesh.mesh_dim_names and "tp" in first.device_mesh.mesh_dim_names:
         raise ValueError("Tensor-parallel checkpoints are unsupported")
-    placement = placements[0]
+    if (
+        mesh.ndim not in (1, 2)
+        or len(placements) != mesh.ndim
+        or sorted(mesh.flatten().tolist()) != list(range(len(values)))
+    ):
+        raise ValueError("Expected an FSDP or HSDP mesh covering every rank")
+    if mesh.ndim == 2 and (first.device_mesh.mesh_dim_names != ("ddp", "fsdp") or type(placements[0]) is not Replicate):
+        raise ValueError("HSDP requires a replicated ddp dimension followed by an fsdp dimension")
+    placement = placements[-1]
     if type(placement) not in (Shard, Replicate):
         raise ValueError(f"Unsupported DTensor placement: {placement}")
     for value in values:
@@ -209,8 +216,14 @@ def reconstruct_tensor(values: list[torch.Tensor], shape: tuple[int, ...]) -> to
     dim = placement.dim
     if not 0 <= dim < len(shape):
         raise ValueError("Invalid sharding dimension")
-    ordered = [local[rank] for rank in mesh.tolist()]
-    chunk = (shape[dim] + len(values) - 1) // len(values)
+    shard_ranks = mesh.tolist() if mesh.ndim == 1 else mesh[0].tolist()
+    ordered = [local[rank] for rank in shard_ranks]
+    if mesh.ndim == 2:
+        # Each HSDP row holds the same FSDP shards; merge one replica group.
+        for replica in mesh.tolist()[1:]:
+            if any(not torch.equal(local[rank], tensor) for rank, tensor in zip(replica, ordered, strict=True)):
+                raise ValueError("HSDP tensor replicas disagree")
+    chunk = (shape[dim] + len(ordered) - 1) // len(ordered)
     extents = []
     for coordinate, tensor in enumerate(ordered):
         expected = list(shape)
@@ -377,6 +390,14 @@ def _check_pipeline(base: Path, architecture: str, component: str) -> None:
             continue
         value = config[key]
         expected = types[key]
+        if architecture == "QwenImage21Pipeline" and key == "sample_sigmas":
+            if value is not None and (
+                not isinstance(value, list)
+                or not value
+                or any(type(sigma) not in (int, float) or not math.isfinite(sigma) for sigma in value)
+            ):
+                raise ValueError(f"Invalid pipeline option: {key}")
+            continue
         # Pipeline options (e.g. Wan boundary_ratio) are not component descriptors.
         if all(kind in (bool, int, float, str, type(None)) for kind in expected):
             if not any(type(value) is kind for kind in expected):
@@ -454,9 +475,15 @@ def _check_h3_pipeline(base: Path) -> None:
         if not isinstance(value, list) or len(value) != 2 or value[1] != class_name:
             raise ValueError(f"Invalid MiniMax H3 component declaration: {component}")
         root = base / component
-        if root.is_symlink() or not root.is_dir() or not (root / "config.json").is_file():
+        config_names = (
+            ("processor_config.json", "preprocessor_config.json") if component == "processor" else ("config.json",)
+        )
+        configs = [root / name for name in config_names]
+        if root.is_symlink() or not root.is_dir() or not any(path.is_file() for path in configs):
             raise ValueError(f"Missing MiniMax H3 component: {component}")
-        read_json(root / "config.json")
+        for path in configs:
+            if path.is_file():
+                read_json(path)
     tokenizer = index.get("tokenizer")
     if (
         not isinstance(tokenizer, list)
@@ -588,7 +615,9 @@ class FSDPModelMerger(BaseModelMerger):
                 raise ValueError("LoRA-only checkpoints cannot be fused into a native MiniMax H3 pipeline")
             for target in sorted(native_shapes):
                 if target == "rope.inv_freq":
-                    value = rope_theta ** (-(torch.arange(0, 2 * rope_len, 2, dtype=torch.float32) / (2 * rope_len)))
+                    value = 1.0 / (
+                        rope_theta ** (torch.arange(0, 2 * rope_len, 2, dtype=torch.float32) / (2 * rope_len))
+                    )
                     if not torch.equal(value, _read_weight(native_mapping, target)):
                         raise ValueError("MiniMax H3 base rope.inv_freq conflicts with the actor config")
                 else:

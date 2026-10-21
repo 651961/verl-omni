@@ -340,12 +340,15 @@ def dump_generations(
                 output_paths.append(video_path)
     else:
         for i in range(n):
-            image_path = os.path.join(visual_folder, f"{i}.jpg")
             try:
                 pixels = previews[i].data if previews is not None else outputs[i]
                 image = pixels.detach().cpu().permute(1, 2, 0).numpy()
                 image = Image.fromarray(image.squeeze(-1) if image.shape[-1] == 1 else image)
-                image.convert("RGB").save(image_path)
+                extension = "png" if image.mode == "RGBA" else "jpg"
+                if image.mode != "RGBA":
+                    image = image.convert("RGB")
+                image_path = os.path.join(visual_folder, f"{i}.{extension}")
+                image.save(image_path)
             except (OSError, TypeError, ValueError, RuntimeError) as error:
                 image_export_errors[i] = f"{type(error).__name__}: {error}"
                 sys_logger.warning("Failed to export rollout image at step %s sample %s: %s", global_steps, i, error)
@@ -1090,7 +1093,7 @@ class BaseRayDiffusionTrainer(ABC):
         # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
         # to stream reward computation with actor rollout
         reward_loop_worker_handles = (
-            self.reward_loop_manager.reward_loop_workers if self.enable_agent_reward_loop else None
+            self.reward_loop_manager.reward_loop_worker_handles if self.enable_agent_reward_loop else None
         )
 
         self.llm_server_manager = LLMServerManager.create(

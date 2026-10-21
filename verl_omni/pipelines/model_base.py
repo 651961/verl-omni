@@ -176,6 +176,26 @@ class DiffusionModelBase(ABC):
         return True
 
     @classmethod
+    def cast_forward_inputs(cls) -> bool:
+        """Whether FSDP casts floating inputs to its parameter compute dtype."""
+        return True
+
+    @classmethod
+    def weight_sync_dtype(cls) -> torch.dtype | None:
+        """Override the dtype of floating non-sharded weights sent to rollout."""
+        return None
+
+    @classmethod
+    def prepare_rollout_row(cls, field: dict, extra: dict, *, row_index: int, validate: bool, config) -> dict:
+        """Normalize algorithm-owned replay fields before persisting one trajectory."""
+        return field
+
+    @classmethod
+    def reward_extra_fields(cls, extra: dict) -> dict:
+        """Select rollout metadata needed by reward workers."""
+        return extra
+
+    @classmethod
     def get_fsdp_ignored_module_names(cls, model_config) -> list[str]:
         """Submodule name components to leave unsharded under FSDP2 (default: none).
 

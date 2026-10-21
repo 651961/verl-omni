@@ -259,7 +259,7 @@ def ref2va_reference_image_short_edge(value: int | str | None = None) -> Iterato
     import vllm_omni.model_executor.models.minimax_h3.encoder_processing as _h3_encoder_processing
     from vllm_omni.model_executor.models.minimax_h3 import preprocessing as _h3_preprocessing
 
-    def _scaled_shape(image: Any) -> tuple[int, int]:
+    def _scaled_shape(image: Any, *, max_area: int | None = None) -> tuple[int, int]:
         width, height = image.size
         ratio = width / height
         if not 0.4 <= ratio <= 2.5:
@@ -271,6 +271,8 @@ def ref2va_reference_image_short_edge(value: int | str | None = None) -> Iterato
                 f"reference image dimensions must be in [256, 5760] pixels, got {width}x{height}"
             )
         scale = short_edge / min(width, height)
+        if max_area is not None:
+            scale = min(scale, (max_area / (width * height)) ** 0.5)
         return (
             _h3_preprocessing._align_multiple(width * scale, _h3_preprocessing.MINIMAX_H3_REFERENCE_IMAGE_MULTIPLE),
             _h3_preprocessing._align_multiple(height * scale, _h3_preprocessing.MINIMAX_H3_REFERENCE_IMAGE_MULTIPLE),

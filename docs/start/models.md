@@ -1,6 +1,6 @@
 # Supported Models
 
-Last updated: 10/16/2026.
+Last updated: 10/20/2026.
 
 VeRL-Omni supports RL post-training for generative models across image, video,
 audio, and omni modalities. This page catalogues every model with a ready-to-run
@@ -51,6 +51,16 @@ requirements.
 | DiffusionNFT (V1 sync — default) | `examples/diffusionnft_trainer/qwen_image/run_qwen_image_ocr_lora_v1.sh` | 4×GPU |
 
 **Reward model:** `Qwen/Qwen3-VL-8B-Instruct` (OCR VLM judge, TP=4 colocated).
+
+### Qwen-Image 2.1
+
+Qwen-Image 2.1 and Turbo support text-to-image and image editing with RGBA
+references and variable geometry. DiffusionART uses full-parameter FSDP2 actors
+with V1 `separate_async` and native vLLM-Omni rollout. The standard recipe reserves
+8 actor + 2 rollout GPUs; Turbo reserves 8 + 8. Native Qwen-Image 2.1 dependencies
+are required beyond the base installation. See the
+[recipes](../../examples/diffusionart_trainer/qwen_image21/README.md) and
+[algorithm guide](../algo/diffusionart.md) for constraints and validation scope.
 
 ### Qwen-Image-Edit
 
@@ -196,6 +206,7 @@ data prep, and Diffusers pin, see
 | DiffusionNFT (T2VA LoRA) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh` | 8×GPU (TP=2) |
 | DiffusionNFT (T2VA LoRA, Ascend NPU) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora_npu.sh` | 16×NPU (FSDP=8, TP=4, CPU offload) |
 | DiffusionNFT (FL2VA LoRA) | `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_fl2va_lora.sh` | 8×GPU (TP=4) |
+| DiffusionART (FL2VA/Ref2VA, full, V1 separate async) | `examples/diffusionart_trainer/minimax_h3/` | 8 actor + 8 rollout GPUs (TP=4) |
 
 **Reward models:** CLAP and ImageBind (audio-video alignment), same pair as LTX-2.3.
 

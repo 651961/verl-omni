@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
+import pickle
 from types import SimpleNamespace
 
 import torch
@@ -86,6 +88,16 @@ def test_wrap_rollout_postprocessor_preserves_metadata() -> None:
     torch.testing.assert_close(output["metadata"]["rl"]["latents_clean"], torch.ones(1))
 
 
+def test_importable_postprocessor_preserves_token_only_dualgrpo_output():
+    from unittest.mock import Mock
+
+    native = Mock(side_effect=AssertionError("Token-only outputs must bypass media decoding"))
+    postprocess = wrap_rollout_postprocessor(native)
+    output = {"payload": {}, "metadata": {"ar_response_ids": [1, 2], "ar_log_probs": [-0.1, -0.2]}}
+    assert postprocess(output) is output
+    native.assert_not_called()
+
+
 def test_request_batch_split_slices_native_envelope_recursively() -> None:
     output = rollout_output(
         media=torch.arange(8).view(2, 4),
@@ -105,3 +117,20 @@ def test_request_batch_split_slices_native_envelope_recursively() -> None:
     assert split[1].output["payload"]["image"].tolist() == [[4, 5, 6, 7]]
     assert split[0].output["metadata"]["prompt_embeddings"]["prompt_embeds"].tolist() == [[0, 1, 2]]
     assert split[1].output["metadata"]["rl"]["latents_clean"].tolist() == [[4, 5, 6, 7]]
+
+
+def test_native_h3_postprocessor_survives_output_serialization():
+    from vllm_omni.diffusion.models.minimax_h3.pipeline_minimax_h3 import _minimax_h3_post_process
+
+    envelope = {
+        "payload": {"video": {"video_preview": torch.ones(2, 3, 4, 5, dtype=torch.uint8)}},
+        "metadata": {"media_artifacts": {"primary": "video_preview"}, "rl": {"policy_version": 7}},
+    }
+    native = DiffusionOutput(output=envelope, post_process_func=wrap_rollout_postprocessor(_minimax_h3_post_process))
+    restored = pickle.loads(pickle.dumps(native))
+    assert inspect.signature(restored.post_process_func) == inspect.signature(_minimax_h3_post_process)
+    assert restored.post_process_func(restored.output) is restored.output
+    assert restored.output["metadata"]["rl"]["policy_version"] == 7
+    torch.testing.assert_close(
+        restored.output["payload"]["video"]["video_preview"], envelope["payload"]["video"]["video_preview"]
+    )

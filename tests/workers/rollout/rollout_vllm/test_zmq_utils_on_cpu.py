@@ -70,6 +70,7 @@ def test_worker_receivers_resolve_shared_update_id_from_their_rank_local_handles
             worker = SimpleNamespace(
                 device="npu",
                 _pending_lora_peft_config=None,
+                _commit_serving_policy_version=lambda: None,
                 _get_zmq_handle=lambda base_handle=base_handle: base_handle,
                 _get_standard_weight_model_and_config=lambda: None,
                 model_runner=SimpleNamespace(pipeline=SimpleNamespace(load_weights=lambda weights: None)),

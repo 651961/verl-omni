@@ -71,7 +71,7 @@ def test_latent_primary_dumps_decoded_image_previews(tmp_path, version, latent_s
     for row, size, value in zip(rows, [(5, 4), (3, 2)], [37, 211], strict=False):
         with Image.open(row["output"]) as image:
             assert image.size == size
-            assert image.getpixel((0, 0)) == (value, value, value)
+            assert image.getpixel((0, 0)) == (value,) * (4 if channels == 4 else 3)
     torch.testing.assert_close(latents, before)
 
 

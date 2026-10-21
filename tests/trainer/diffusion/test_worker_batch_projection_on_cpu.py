@@ -42,6 +42,7 @@ def _make_config():
                     "vae_scale_factor": 8,
                 },
                 "actor": {
+                    "diffusion_loss": {"loss_mode": "dpo"},
                     "ppo_mini_batch_size": 2,
                     "ppo_epochs": 1,
                     "data_loader_seed": 0,

@@ -484,8 +484,8 @@ def test_real_cli_cpu_startup_and_export(case):
     assert '"integrity": "passed"' in run.stdout
 
 
-@pytest.fixture(scope="module")
-def dtensor_ranks(tmp_path_factory):
+@pytest.fixture(scope="module", params=[False, True], ids=["fsdp", "hsdp"])
+def dtensor_ranks(tmp_path_factory, request):
     root = tmp_path_factory.mktemp("dtensor-shards")
     state = {
         "rows": torch.arange(15).reshape(5, 3).float(),
@@ -496,15 +496,19 @@ def dtensor_ranks(tmp_path_factory):
     }
     torch.save(state, root / "full.pt")
     run = subprocess.run(
-        [sys.executable, str(Path(__file__).with_name("dtensor_checkpoint.py")), str(root)],
+        [sys.executable, str(Path(__file__).with_name("dtensor_checkpoint.py")), str(root)]
+        + (["--hsdp"] if request.param else []),
         capture_output=True,
         text=True,
         timeout=120,
     )
     assert run.returncode == 0, run.stdout + run.stderr
+    world_size = 4 if request.param else 2
     ranks = [
-        torch.load(root / f"model_world_size_2_rank_{rank}.pt", map_location="cpu", mmap=True, weights_only=False)
-        for rank in range(2)
+        torch.load(
+            root / f"model_world_size_{world_size}_rank_{rank}.pt", map_location="cpu", mmap=True, weights_only=False
+        )
+        for rank in range(world_size)
     ]
     assert not torch.distributed.is_initialized()
     return state, ranks
@@ -541,6 +545,26 @@ def test_dtensor_layout_errors(dtensor_ranks, fault):
         values[0]._spec.placements = (Shard(0), Replicate())
     with pytest.raises(ValueError):
         reconstruct_tensor(values, tuple(ranks[0][key].shape))
+
+
+@pytest.mark.parametrize("dtensor_ranks", [True], indirect=True, ids=["hsdp"])
+@pytest.mark.parametrize("fault", ["replica", "placement"])
+def test_invalid_hsdp_replicas(dtensor_ranks, fault):
+    import copy
+
+    from torch.distributed.tensor import Shard
+
+    state, ranks = dtensor_ranks
+    values = [copy.deepcopy(rank["rows"]) for rank in ranks]
+    if fault == "replica":
+        values[2]._local_tensor.add_(1)
+        message = "HSDP tensor replicas disagree"
+    else:
+        for value in values:
+            value._spec.placements = (Shard(0), Shard(0))
+        message = "replicated ddp dimension"
+    with pytest.raises(ValueError, match=message):
+        reconstruct_tensor(values, tuple(state["rows"].shape))
 
 
 @pytest.mark.parametrize("fault", ["component", "required_file", "architecture", "weight_index"])
@@ -666,7 +690,8 @@ def test_full_lora_checkpoint_exports_pipeline_and_adapter(case):
 
 
 @pytest.mark.parametrize(
-    "layout", ["rows", "columns", "empty", "scalar", "replica_mismatch", "partial", "hsdp", "mixed", "plain_mismatch"]
+    "layout",
+    ["rows", "columns", "empty", "scalar", "replica_mismatch", "partial", "placement", "mixed", "plain_mismatch"],
 )
 def test_lora_export_uses_checkpoint_layout(dtensor_ranks, tmp_path, layout):
     from copy import deepcopy
@@ -680,13 +705,13 @@ def test_lora_export_uses_checkpoint_layout(dtensor_ranks, tmp_path, layout):
         values[1]._local_tensor.add_(1)
     elif layout == "partial":
         values[0]._spec.placements = (Partial(),)
-    elif layout == "hsdp":
+    elif layout == "placement":
         values[0]._spec.placements = (Shard(0), Replicate())
     elif layout == "mixed":
         values[1] = values[1].to_local()
     elif layout == "plain_mismatch":
         values = [full[key], full[key] + 1]
-    paths = [tmp_path / f"rank_{rank}.pt" for rank in range(2)]
+    paths = [tmp_path / f"rank_{rank}.pt" for rank in range(len(values))]
     for path, value in zip(paths, values, strict=True):
         torch.save({"block.to_out.0.lora_A.default.weight": value}, path)
     if layout in full:

@@ -67,6 +67,9 @@ class VeOmniDiffusionEngine(BaseEngine):
     ):
         super().__init__()
 
+        if model_config.gradient_checkpointing_save_ops:
+            raise NotImplementedError("gradient_checkpointing_save_ops is supported only by the FSDP diffusion engine.")
+
         is_lora = model_config.lora_rank > 0 or model_config.lora_adapter_path is not None
         if is_lora:
             _validate_veomni_lora_support(model_config)

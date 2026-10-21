@@ -101,6 +101,7 @@ def _trainer(
     sampleable_count: int = 0,
 ) -> PolicyGradientDiffusionTrainerV1SeparateAsync:
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer._loss_fn = None
     trainer.config = OmegaConf.create(
         {
             "data": {"train_batch_size": train_batch_size},
@@ -253,6 +254,7 @@ def test_diffusion_trainer_yaml_declares_upstream_hybrid_rollout_defaults():
 
 def test_setup_leaves_hybrid_in_rollout_mode_and_registered(monkeypatch):
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer._loss_fn = None
     events: list[str] = []
     trainer.config = OmegaConf.create(
         {
@@ -424,6 +426,7 @@ def test_prepare_step_submits_prompts_before_the_blocking_wait():
 
 def test_base_step_merges_prepare_metrics_into_the_step():
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer._loss_fn = None
     trainer.config = OmegaConf.create({"data": {"train_batch_size": 4}})
     trainer.parameter_sync_step = 2
     trainer.sync_compatible = False

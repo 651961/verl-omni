@@ -82,6 +82,7 @@ def test_separate_async_validates_parameter_sync_batches(monkeypatch):
 
 def test_separate_async_uses_upstream_async_replay_buffer():
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer._loss_fn = None
     trainer.trainer_mode = "separate_async"
     trainer._add_prompts_to_generate = lambda count: count
     trainer.config = OmegaConf.create(
@@ -108,6 +109,7 @@ def test_separate_async_uses_upstream_async_replay_buffer():
 
 def test_base_step_samples_one_mini_batch_per_local_update():
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer._loss_fn = None
     trainer.config = OmegaConf.create({"data": {"train_batch_size": 8}})
     trainer.parameter_sync_step = 4
     trainer.sync_compatible = False
@@ -150,6 +152,7 @@ def test_base_step_samples_one_mini_batch_per_local_update():
 )
 def test_separate_async_refuses_to_pad_invalid_local_batch(batch_size, dp_size, message):
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer._loss_fn = None
     trainer.trainer_mode = "separate_async"
     if dp_size == 1:
         trainer.actor_rollout_wg = SimpleNamespace()
@@ -215,6 +218,7 @@ def test_sync_balance_batch_zeros_duplicated_pad_row_advantages():
 
 def test_separate_async_uses_single_prompt_generation_batches_for_exact_refill():
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer._loss_fn = None
     trainer.trainer_mode = "separate_async"
     trainer.config = OmegaConf.create(
         {
@@ -228,6 +232,7 @@ def test_separate_async_uses_single_prompt_generation_batches_for_exact_refill()
 
 def test_sync_compatible_prefetches_all_local_batches_before_training():
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer._loss_fn = None
     trainer.config = OmegaConf.create({"data": {"train_batch_size": 4}})
     trainer.parameter_sync_step = 2
     trainer.sync_compatible = True
@@ -283,6 +288,7 @@ class _FakeSnapshotWorkerGroup:
 
 def test_old_policy_is_stable_across_local_updates(monkeypatch):
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer._loss_fn = None
     trainer.parameter_sync_step = 3
     trainer.actor_rollout_wg = _FakeSnapshotWorkerGroup()
 
@@ -306,6 +312,7 @@ def test_old_policy_is_stable_across_local_updates(monkeypatch):
 
 def test_on_step_end_syncs_every_outer_step():
     trainer = object.__new__(PolicyGradientDiffusionTrainerV1SeparateAsync)
+    trainer._loss_fn = None
     events = []
     trainer.global_steps = 1
     trainer.prev_step_profile = False

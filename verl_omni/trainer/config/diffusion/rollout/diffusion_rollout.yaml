@@ -203,6 +203,9 @@ val_kwargs:
     # Reference-image short edge for compatible pipelines (validation)
     reference_image_short_edge: ${oc.select:actor_rollout_ref.rollout.pipeline.reference_image_short_edge,null}
 
+    # ART ODE steps cached during validation; unused for actor updates.
+    art_step_indices: null
+
     # Wan2.2 number of frames (validation)
     num_frames: ${oc.select:actor_rollout_ref.rollout.pipeline.num_frames,1}
 
@@ -325,6 +328,9 @@ pipeline:
 
   # Reference-image short edge for compatible pipelines
   reference_image_short_edge: null
+
+  # ART ODE step indices to cache and train; null selects every step.
+  art_step_indices: null
 
   # Wan2.2 number of frames
   num_frames: 1

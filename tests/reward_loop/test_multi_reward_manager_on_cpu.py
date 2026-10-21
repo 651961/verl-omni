@@ -166,6 +166,47 @@ def _make_single_data(data_source: str = "test_source") -> DataProto:
     )
 
 
+@pytest.mark.asyncio
+async def test_ragged_rgba_responses_reach_visual_scorers_without_transport_padding(monkeypatch):
+    import numpy as np
+
+    from verl_omni.trainer.diffusion.v1 import tq_utils
+
+    originals = [torch.full((4, 2, 5), 7, dtype=torch.uint8), torch.full((4, 5, 2), 11, dtype=torch.uint8)]
+    monkeypatch.setattr(
+        tq_utils.tq,
+        "kv_batch_get",
+        lambda **kwargs: {
+            "responses": originals,
+            "data_source": ["test_source"] * 2,
+            "reward_model": [{"ground_truth": "hello"}] * 2,
+            "extra_info": [{}] * 2,
+            "extra_fields": [{"response_shape": tuple(image.shape)} for image in originals],
+        },
+    )
+    from types import SimpleNamespace
+
+    batch = tq_utils.diffusion_tq_batch_to_dataproto(SimpleNamespace(keys=["a", "b"], partition_id="train"))
+    assert batch.batch["responses"].shape == (2, 4, 5, 5)
+    seen = []
+
+    async def score(**kwargs):
+        seen.append(kwargs["solution_image"])
+        return {"score": float(kwargs["solution_image"].float().mean())}
+
+    visual = VisualRewardManager(_make_config({}), MagicMock(), score)
+    multi = _build_pixel_multi_manager()
+    for row, expected in enumerate(originals):
+        result = await visual.run_single(batch[row : row + 1])
+        torch.testing.assert_close(seen[-1], expected)
+        assert result["reward_score"] == float(expected.flatten()[0])
+        kwargs = await multi._build_reward_kwargs(batch[row])
+        torch.testing.assert_close(kwargs["solution_image"], expected)
+    batch.non_tensor_batch["response_shape"] = np.array([(4, 9, 5), (4, 5, 2)], dtype=object)
+    with pytest.raises(ValueError, match="Invalid rollout response_shape"):
+        await visual.run_single(batch[:1])
+
+
 def _build_manager(reward_functions: dict) -> MultiVisualRewardManager:
     config = _make_config(reward_functions)
     tokenizer = MagicMock()

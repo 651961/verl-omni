@@ -103,7 +103,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
 
         return super().__new__(cls)
 
-    def set_pending_lora_peft_config(self, peft_config: dict | None = None):
+    def set_pending_lora_peft_config(self, peft_config: dict | None = None, global_steps: int | None = None):
         """Stash the actor's LoRA ``peft_config`` for the next
         ``update_weights_from_ipc`` call (separate-async NCCL path only).
 
@@ -114,6 +114,19 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
         later full-weight sync is not misrouted.
         """
         self._pending_lora_peft_config = peft_config
+        self._pending_policy_version = global_steps
+
+    def _commit_serving_policy_version(self):
+        """Expose a new generation version only after its complete weight stream succeeds."""
+        version = getattr(self, "_pending_policy_version", None)
+        if version is None:
+            return
+        # AR workers have a model; diffusion workers expose a pipeline.
+        pipeline = getattr(self.model_runner, "pipeline", None)
+        setter = getattr(pipeline, "set_published_policy_version", None)
+        if setter is not None:
+            setter(int(version))
+        self._pending_policy_version = None
 
     def _move_diffusion_lora_stacks_to_device(self) -> None:
         """Move unregistered LoRA stacks to the worker device before execution."""
@@ -267,6 +280,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                     )
                 )
                 self._finish_delta_stream(delta_state)
+                self._commit_serving_policy_version()
                 return
 
             delta_ctx = {"delta": None}
@@ -355,7 +369,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 # Diffusion pipeline worker: load via the pipeline. vllm-omni
                 # 0.26 removed DiffusionWorker/DiffusionModelRunner.load_weights;
                 # each pipeline exposes load_weights via AutoWeightsLoader.
-                pipeline = getattr(getattr(self, "model_runner", None), "pipeline", None)
+                pipeline = self.model_runner.pipeline
                 if pipeline is not None and hasattr(pipeline, "load_weights"):
                     load_fn = pipeline.load_weights
                 elif hasattr(self, "load_weights"):
@@ -369,6 +383,8 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 receiver.receive_weights(on_bucket_received=_route_bucket)
                 if delta_ctx["delta"]:
                     self._finish_delta_stream(delta_ctx)
+
+        self._commit_serving_policy_version()
 
     def _apply_delta_bucket(self, weights, state: dict, is_last: bool = False) -> None:
         """Gates + in-place apply for one bucket of the delta flush stream.
@@ -403,7 +419,7 @@ class vLLMOmniColocateWorkerExtension(CustomPipelineWorkerExtension):
                 load_target = model
                 state["model"], state["model_config"] = model, model_config
             else:
-                pipeline = getattr(getattr(self, "model_runner", None), "pipeline", None)
+                pipeline = self.model_runner.pipeline
                 if pipeline is not None and hasattr(pipeline, "load_weights"):
                     load_target = pipeline
                 elif hasattr(self, "load_weights"):

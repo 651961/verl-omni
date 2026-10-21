@@ -45,3 +45,10 @@ def _stable_score(solution: torch.Tensor | np.ndarray) -> float:
 def compute_score(solution_image, *_, **__) -> float:
     """Return a deterministic smoke-test score for an H3 rollout output."""
     return _stable_score(solution_image)
+
+
+def compute_art_score(solution_image, *, extra_info, **kwargs) -> dict[str, float]:
+    """Return separate content-dependent modality scores for the ART smoke test."""
+    video = _stable_score(solution_image)
+    audio = _stable_score(extra_info["media_artifacts"]["audio"].data)
+    return {"score": 0.5 * (video + audio), "video_reward": video, "audio_reward": audio}

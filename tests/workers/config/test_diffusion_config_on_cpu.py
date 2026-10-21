@@ -245,6 +245,14 @@ class TestDiffusionRolloutConfig:
 
 
 class TestDiffusionModelConfigPolicyAdapters:
+    @pytest.mark.parametrize("target", ["aten.mm.default", "transformer_blocks.*.attn.to_out.0"])
+    def test_selective_checkpointing_requires_checkpointing(self, target):
+        with pytest.raises(ValueError, match="requires enable_gradient_checkpointing=True"):
+            DiffusionModelConfig(
+                enable_gradient_checkpointing=False,
+                gradient_checkpointing_save_ops=[target],
+            )
+
     def test_policy_state_adapters_via_hydra(self, tmp_path):
         import json
         import os
@@ -269,11 +277,17 @@ class TestDiffusionModelConfigPolicyAdapters:
                     "+load_tokenizer=false",
                     "attn_backend=native",
                     'policy_state_adapters=["default","old"]',
+                    "gradient_checkpointing_save_ops=[aten._scaled_dot_product_flash_attention.default,"
+                    "transformer_blocks.*.attn.to_out.0]",
                 ],
             )
         with patch("verl_omni.workers.config.diffusion.model.resolve_model_local_dir", return_value=str(model_dir)):
             model_cfg: DiffusionModelConfig = omega_conf_to_dataclass(cfg)
         assert tuple(model_cfg.policy_state_adapters) == ("default", "old")
+        assert list(model_cfg.gradient_checkpointing_save_ops) == [
+            "aten._scaled_dot_product_flash_attention.default",
+            "transformer_blocks.*.attn.to_out.0",
+        ]
 
     def test_h3_rejects_all_linear_lora_before_rollout_sync(self, tmp_path):
         import json

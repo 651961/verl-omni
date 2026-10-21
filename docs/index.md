@@ -67,6 +67,7 @@ start/rl_insight.md
 algo/flowgrpo.md
 algo/flowdppo.md
 algo/diffusion_dpo.md
+algo/diffusionart.md
 algo/diffusionnft.md
 algo/dgpo.md
 algo/grpo_guard.md

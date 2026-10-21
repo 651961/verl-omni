@@ -81,5 +81,12 @@ run_test 10 "Boogu-Image DiffusionNFT trainer e2e" \
 run_test 11 "Named image previews and MiniMax-H3 offload placeholders" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
     pytest -q tests/trainer/diffusion/test_artifact_preview_dump.py tests/pipelines/test_minimax_h3_meta_output.py
+run_test 12 "MiniMax-H3 DiffusionART FL2VA variable-size trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    python3 tests/special_e2e/run_minimax_h3_diffusion_art_tiny.py --task fl2va
+
+run_test 13 "MiniMax-H3 DiffusionART Ref2VA variable-size trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" \
+    python3 tests/special_e2e/run_minimax_h3_diffusion_art_tiny.py --task ref2va
 
 gpu_smoke_summary

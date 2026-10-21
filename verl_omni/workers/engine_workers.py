@@ -187,11 +187,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         if getattr(self.model_config, "hf_config", None) is not None:
             self.flops_counter = FlopsCounter(self.model_config.hf_config)
-        elif self.config.model_type in (
-            "diffusion_model",
-            "diffusion_dpo_model",
-            "diffusion_nft_model",
-        ):
+        elif isinstance(self.model_config, DiffusionModelConfig):
             self.flops_counter = DiffusionFlopsCounter(
                 architecture=getattr(self.model_config, "architecture", None),
                 transformer_config=getattr(self.model_config, "transformer_config", None),
@@ -645,11 +641,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         model_config: HFModelConfig | DiffusionModelConfig | OmniModelConfig = omega_conf_to_dataclass(
             self.config.model
         )
-        is_diffusion = model_config.get("model_type", "language_model") in (
-            "diffusion_model",
-            "diffusion_dpo_model",
-            "diffusion_nft_model",
-        )
+        is_diffusion = isinstance(model_config, DiffusionModelConfig)
 
         # 1. build reference model
         if "ref" in self.role:

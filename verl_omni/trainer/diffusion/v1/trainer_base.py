@@ -459,6 +459,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 "training/rollout_failure/evicted_trajectories",
                 "training/rollout_failure/refilled_prompts",
                 "training/rollout_failure/refill_rounds",
+                *(() if self._loss_fn is None else self._loss_fn.update_sum_metrics),
             ]
         )
         if prepare_metrics:
@@ -682,20 +683,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 "model_type=diffusion_dpo_model so infer_actor_batch / infer_ref_batch "
                 "emit noise_pred rather than SDE log_probs."
             )
-        if noise_pred.ndim >= 2 and noise_pred.shape[1] == 1:
-            noise_pred = noise_pred[:, 0]
-        noise = tu.get(output, "noise")
-        if noise.ndim >= 2 and noise.shape[1] == 1:
-            noise = noise[:, 0]
-        timesteps = tu.get(output, "timesteps")
-        if timesteps.ndim >= 2 and timesteps.shape[1] == 1:
-            timesteps = timesteps[:, 0]
-        ref_output = {
-            "ref_noise_pred": noise_pred.float(),
-            "noise": noise.float(),
-            "timesteps": timesteps.float(),
-        }
-        return DataProto.from_tensordict(tu.get_tensordict(ref_output))
+        loss_fn = get_diffusion_loss_fn(self.config.actor_rollout_ref.actor.diffusion_loss.loss_mode)
+        return loss_fn.prepare_reference_batch(output)
 
     def _update_old_policy(self) -> tuple[bool, float, str]:
         """Refresh the NFT old-policy adapter (copy or EMA)."""
@@ -746,13 +735,24 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                     data = data.union(ref_infer_res)
 
         with marked_timer("update_actor", timing_raw, color="red"):
-            actor_output = self._update_actor(data)
-            actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+            actor_metrics = self._update_actor_windows(data)
             metrics.update(actor_metrics)
             if self._has_old_adapter:
                 metrics.update(compute_old_policy_metrics(self._update_old_policy()))
 
         return batch_meta
+
+    def _update_actor_windows(self, data: DataProto) -> dict:
+        """Dispatch loss-owned update batches against the same prepared rollout targets."""
+        loss_fn = get_diffusion_loss_fn(self.config.actor_rollout_ref.actor.diffusion_loss.loss_mode)
+        seed = self.config.actor_rollout_ref.actor.data_loader_seed
+        seed += self.global_steps * self.parameter_sync_step + self.local_trigger_step
+        windows, schedule_metrics = loss_fn.actor_update_batches(data, torch.Generator().manual_seed(seed))
+        aggregator = MetricsAggregator()
+        for window in windows:
+            actor_output = self._update_actor(window)
+            aggregator.add_step_metrics(reduce_metrics(actor_output.meta_info["metrics"]), sample_count=len(window))
+        return {**aggregator.get_aggregated_metrics(), **schedule_metrics}
 
     def on_init_end(self):
         """Called after initialization ends."""
@@ -816,6 +816,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
     def _setup(self):
         self._init_tokenizer()
+        if self._loss_fn is not None:
+            self._loss_fn.validate_model_config(self.config)
         self._init_dataloader()
         self._init_dump_executor()
         self._init_resource_pool_mgr()
@@ -835,7 +837,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
         from verl.utils import hf_processor, hf_tokenizer
 
-        from verl_omni.utils.fs import resolve_model_local_dir
+        from verl_omni.utils.fs import resolve_diffusion_tokenizer_path, resolve_model_local_dir
 
         local_path = resolve_model_local_dir(
             self.config.actor_rollout_ref.model.path,
@@ -844,10 +846,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         trust_remote_code = self.config.data.get("trust_remote_code", False)
 
         if self.config.actor_rollout_ref.model.tokenizer_path is None:
-            tokenizer_path = os.path.join(local_path, "tokenizer")
-            self.config.actor_rollout_ref.model.tokenizer_path = (
-                tokenizer_path if os.path.exists(tokenizer_path) else local_path
-            )
+            self.config.actor_rollout_ref.model.tokenizer_path = resolve_diffusion_tokenizer_path(local_path)
         self.tokenizer = hf_tokenizer(
             self.config.actor_rollout_ref.model.tokenizer_path, trust_remote_code=trust_remote_code
         )
@@ -868,6 +867,10 @@ class PolicyGradientDiffusionTrainerV1(ABC):
                 ) from exc
 
         from verl_omni.pipelines.model_base import DiffusionModelBase
+
+        # Keep the resolved architecture available to model-specific batch preparation.
+        with open_dict(model_config):
+            model_config.architecture = architecture
 
         prepared_processor_path = DiffusionModelBase.get_class_by_name(
             architecture,
@@ -931,6 +934,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         # Per-run monotonic generation-batch number; pairs with the batch-local
         # ``index`` so TQ row ordering survives multi-batch sampling paths.
         self._gen_batch_seq = 0
+        self._rollout_seed_offset = 0
         val_batch_size = self.config.data.val_batch_size or len(self.val_dataset)
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
@@ -952,8 +956,9 @@ class PolicyGradientDiffusionTrainerV1(ABC):
             OmegaConf.set_struct(self.config, True)
             with open_dict(self.config):
                 if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
+                    loss_fn = get_diffusion_loss_fn(self.config.actor_rollout_ref.actor.diffusion_loss.loss_mode)
                     self.config.actor_rollout_ref.actor.optim.total_training_steps = (
-                        total_training_steps * self.parameter_sync_step
+                        total_training_steps * self.parameter_sync_step * loss_fn.optimizer_updates_per_batch
                     )
         except (KeyError, TypeError, AttributeError, OmegaConf.errors.OmegaConfBaseException) as e:
             raise RuntimeError("Failed to propagate trainer.total_training_steps to actor optimizer config.") from e
@@ -1163,7 +1168,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
     def get_reward_handles(self):
         if self.enable_agent_reward_loop:
-            return self.reward_loop_manager.reward_loop_workers
+            return self.reward_loop_manager.reward_loop_worker_handles
         return None
 
     def _fetch_one_gen_batch(self):
@@ -1179,6 +1184,12 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         batch_dict["index"] = np.arange(len(batch_dict["raw_prompt"]))
         batch_dict["gen_batch_seq"] = np.full(len(batch_dict["raw_prompt"]), self._gen_batch_seq)
         self._gen_batch_seq += 1
+        # Generation chunks may each have index=0. Use a run-wide prompt
+        # counter for noise seeds, independent of chunking and worker routing.
+        seed_offset = self._rollout_seed_offset
+        count = len(batch_dict["raw_prompt"])
+        batch_dict["_rollout_seed_global_idx"] = np.arange(seed_offset, seed_offset + count)
+        self._rollout_seed_offset = seed_offset + count
         return tu.get_tensordict(batch_dict)
 
     def _generation_batch_size(self) -> int:
@@ -1481,6 +1492,8 @@ class PolicyGradientDiffusionTrainerV1(ABC):
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
         shuffle = self.config.actor_rollout_ref.actor.shuffle
         loss_mode = OmegaConf.select(self.config, "actor_rollout_ref.actor.diffusion_loss.loss_mode")
+        if loss_mode is not None and get_diffusion_loss_fn(loss_mode).requires_full_batch_update:
+            ppo_mini_batch_size = len(data)
         keep_groups = paired or (loss_mode is not None and get_diffusion_loss_fn(loss_mode).requires_whole_groups)
         if keep_groups and shuffle:
             logger.warning(
@@ -1612,7 +1625,7 @@ class PolicyGradientDiffusionTrainerV1(ABC):
 
             tq.kv_clear(keys=batch_meta.keys, partition_id=batch_meta.partition_id)
 
-        sample_outputs = torch.cat(sample_outputs, dim=0) if sample_outputs else torch.empty(0)
+        sample_outputs = [output for batch_outputs in sample_outputs for output in batch_outputs]
         self._maybe_log_val_generations(
             inputs=sample_inputs,
             outputs=sample_outputs,

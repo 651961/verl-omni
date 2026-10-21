@@ -65,6 +65,33 @@ class DiffusionLossFn(ABC):
     # Whether the loss reduces over whole rollout groups inside a micro batch, so the
     # trainer must not shuffle samples across micro batches.
     requires_whole_groups: bool = False
+    # Direct-preference losses may partition one scored batch into optimizer updates.
+    optimizer_updates_per_batch: int = 1
+    requires_full_batch_update: bool = False
+    handles_kl_loss: bool = False
+    update_sum_metrics: tuple[str, ...] = ()
+
+    @staticmethod
+    def actor_update_batches(data: DataProto, generator: torch.Generator) -> tuple[list[DataProto], dict]:
+        """Return optimizer batches and schedule metrics for one scored rollout batch."""
+        return [data], {}
+
+    @staticmethod
+    def prepare_reference_batch(output: TensorDict) -> DataProto:
+        """Convert reference inference into the forward-noising DPO batch contract."""
+        fields = {
+            "ref_noise_pred": tu.get(output, "noise_pred"),
+            "noise": tu.get(output, "noise"),
+            "timesteps": tu.get(output, "timesteps"),
+        }
+        return DataProto.from_tensordict(
+            tu.get_tensordict(
+                {
+                    key: (value[:, 0] if value.ndim >= 2 and value.shape[1] == 1 else value).float()
+                    for key, value in fields.items()
+                }
+            )
+        )
 
     def validate_inputs(
         self,
@@ -140,6 +167,11 @@ class DiffusionLossFn(ABC):
         for key in ("train_timestep_range", "train_timestep_count"):
             if getattr(algorithm_cfg, key, None) is not None:
                 raise ValueError(f"algorithm.{key} is only used by the dgpo loss.")
+
+    @staticmethod
+    def validate_model_config(config: Any) -> None:
+        """Validate model-specific requirements after architecture resolution, before worker allocation."""
+        return
 
 
 DIFFUSION_LOSS_REGISTRY: dict[str, DiffusionLossFn] = {}
@@ -795,6 +827,179 @@ class DPOLoss(DiffusionLossFn):
             index=tu.get_non_tensor_data(data, "uid", default=None),
         )
         return DiffusionLossResult(loss=loss, metrics=metrics)
+
+
+@register_diffusion_loss("diffusion_art")
+class DiffusionARTLoss(DiffusionLossFn):
+    """ART velocity objective with frozen rollout predictions and complete-group statistics."""
+
+    required_model_output_keys = ("current_velocity",)
+    required_data_keys = ("old_velocity", "state", "sigma", "dt", "direction", "magnitude")
+    optimizer_updates_per_batch = 2
+    requires_full_batch_update = True
+    handles_kl_loss = True
+    update_sum_metrics = ("actor/art_update_windows", "actor/art_skipped_zero_guidance")
+
+    @staticmethod
+    def actor_update_batches(data: DataProto, generator: torch.Generator) -> tuple[list[DataProto], dict]:
+        """Split complete prompt groups into two updates, or skip zero guidance together."""
+        from verl_omni.pipelines.diffusion_art.data import prompt_window_indices
+
+        direction_rms = data.batch["art_directions"].float().flatten(1).square().mean(1).sqrt()
+        has_magnitude = data.batch["art_magnitudes"].reshape(len(data), -1).gt(0).any(1)
+        if not bool((has_magnitude & (direction_rms > 0)).any()):
+            return [], {"actor/art_skipped_zero_guidance": 1, "actor/art_update_windows": 0}
+        indices = prompt_window_indices(data.non_tensor_batch["uid"], generator=generator)
+        return [data.select_idxs(rows) for rows in indices], {
+            "actor/art_update_windows": len(indices),
+            "actor/art_trajectories_per_update": len(indices[0]),
+            "actor/art_skipped_zero_guidance": 0,
+        }
+
+    @staticmethod
+    def prepare_reference_batch(output: TensorDict) -> DataProto:
+        """Keep every captured timestep of the frozen reference velocity."""
+        return DataProto.from_tensordict(
+            tu.get_tensordict({"art_ref_predictions": tu.get(output, "noise_pred").float()})
+        )
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        config,
+        current_velocity,
+        old_velocity,
+        state,
+        sigma,
+        dt,
+        direction,
+        magnitude,
+        reference_prediction=None,
+        feature_group_sizes=None,
+    ):
+        """Compute the frozen-target velocity loss and scalar training metrics."""
+        from verl_omni.pipelines.diffusion_art.objective import art_feature_group_loss, art_loss, schedule_coefficient
+
+        options = dict(config.diffusion_loss.get("art_loss_options", {}))
+        if "reference_mse_beta" in options or "reference_prediction" in options:
+            raise ValueError("Configure ART reference regularization with actor.use_kl_loss/kl_loss_coef.")
+        current_mean = old_mean = None
+        if options.get("mask_space", "velocity") == "ode_mean":
+            with torch.no_grad():
+                current_mean = state.float() + schedule_coefficient(dt, state, "dt") * current_velocity.detach().float()
+                old_mean = state.float() + schedule_coefficient(dt, state, "dt") * old_velocity.detach().float()
+        loss_fn = art_loss
+        if feature_group_sizes is not None:
+            loss_fn = art_feature_group_loss
+            options["feature_group_sizes"] = feature_group_sizes
+        result = loss_fn(
+            current_velocity,
+            old_velocity,
+            sigma,
+            direction,
+            magnitude,
+            state=state,
+            ode_velocity_coefficient=dt,
+            current_ode_mean=current_mean,
+            old_ode_mean=old_mean,
+            reference_prediction=reference_prediction,
+            reference_mse_beta=config.kl_loss_coef if config.use_kl_loss else 0.0,
+            restore_anchor_mask=torch.full_like(
+                magnitude, config.diffusion_loss["art_restore_zero_signal"], dtype=torch.bool
+            ),
+            **options,
+        )
+        metrics = {
+            "art_policy_loss": result["per_item_policy_loss"].detach().mean(),
+            "art_reference_mse": result["per_item_reference_mse"].detach().mean(),
+            "art_keep_fraction": result["keep_mask"].float().mean(),
+            "art_masked_fraction": result["masked"].float().mean(),
+            "art_movement_score": result["movement_score"].mean(),
+        }
+        return result["per_item_loss"].mean(), metrics
+
+    def __call__(self, *, config, model_output, data):
+        loss, metrics = self.compute_loss(
+            config=config,
+            current_velocity=model_output["current_velocity"],
+            **{key: data[key] for key in self.required_data_keys},
+            reference_prediction=data.get("reference_prediction"),
+            feature_group_sizes=data.get("feature_group_sizes"),
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics, add_loss_metric=True)
+
+    @staticmethod
+    def validate_trainer_config(config):
+        """Validate the supported async ART runtime before allocating workers."""
+        from verl_omni.pipelines.diffusion_art.precision import validate_art_precision
+
+        DiffusionLossFn.validate_trainer_config(config)
+        validate_art_precision(config.actor_rollout_ref.model, config.actor_rollout_ref.actor)
+        if config.actor_rollout_ref.model.model_type != "diffusion_art_model":
+            raise ValueError("ART requires model.model_type=diffusion_art_model.")
+        if not config.trainer.get("use_v1", False) or config.algorithm.trainer_type != "direct_preference":
+            raise ValueError("ART requires the V1 direct_preference trainer.")
+        if config.trainer.v1.trainer_mode != "separate_async":
+            raise ValueError("This ART integration requires separate_async for serving-version commits.")
+        if config.trainer.v1.separate_async.hybrid_rollout.enable_switch:
+            raise ValueError("ART currently requires hybrid_rollout.enable_switch=false.")
+        if config.actor_rollout_ref.rollout.checkpoint_engine.backend == "naive":
+            raise ValueError("ART requires streaming checkpoint publication (nccl or omni_delta_sharded).")
+        if config.actor_rollout_ref.rollout.n < 2:
+            raise ValueError("ART requires rollout.n >= 2 for complete-prompt covariance.")
+        if config.actor_rollout_ref.rollout.n % 2:
+            raise ValueError("ART requires even K (rollout.n) for two disjoint update windows.")
+        actor = config.actor_rollout_ref.actor
+        if actor.ppo_epochs != 1:
+            raise ValueError("ART requires actor.ppo_epochs=1; each rollout batch uses two disjoint updates.")
+        if config.algorithm.paired_preference:
+            raise ValueError("ART requires algorithm.paired_preference=false; guidance uses complete prompt groups.")
+        world_size = config.trainer.nnodes * config.trainer.n_gpus_per_node
+        dp_size = world_size // actor.fsdp_config.ulysses_sequence_parallel_size
+        window_rows = actor.ppo_mini_batch_size * config.actor_rollout_ref.rollout.n // 2
+        if window_rows % dp_size:
+            raise ValueError(
+                f"ART update window has {window_rows} trajectories, which must be divisible by actor DP size {dp_size}."
+            )
+        if config.algorithm.get("sample_source", "online") != "online":
+            raise ValueError("ART requires online rollout caches.")
+        if config.actor_rollout_ref.actor.use_distill_loss:
+            raise ValueError("ART does not support the policy-gradient distillation loss.")
+
+    @staticmethod
+    def validate_model_config(config):
+        """Dispatch native ART checks once the pipeline architecture is known."""
+        from verl_omni.pipelines.model_base import DiffusionModelBase
+
+        DiffusionModelBase.get_class(config.actor_rollout_ref.model).validate_art_config(config)
+
+    @staticmethod
+    def prepare_actor_batch(batch, reward_tensor, config):
+        """Build actor tensors from complete, scored prompt groups."""
+        from verl_omni.pipelines.diffusion_art.data import restore_shared_conditions
+        from verl_omni.pipelines.model_base import DiffusionModelBase
+
+        caches = batch.non_tensor_batch.get("art_cache")
+        uids = batch.non_tensor_batch.get("uid")
+        if caches is None or uids is None:
+            raise ValueError("ART requires art_cache and uid from rollout.")
+        expected = config.actor_rollout_ref.rollout.n
+        counts = defaultdict(int)
+        for uid in uids:
+            counts[str(uid)] += 1
+        if any(n != expected for n in counts.values()):
+            raise ValueError("ART must receive complete prompt groups before computing covariance.")
+        model_cls = DiffusionModelBase.get_class(config.actor_rollout_ref.model)
+        rewards = model_cls.prepare_art_rewards(batch, reward_tensor)
+        caches = restore_shared_conditions(list(caches), uids)
+        options = dict(config.actor_rollout_ref.actor.diffusion_loss.get("art_covariance_options", {}))
+        packed = model_cls.prepare_art_batch(caches, rewards, uids, covariance_options=options)
+        for key, value in packed.items():
+            batch.batch[key] = value
+        # Do not send a second, opaque copy of the full trajectory to every worker.
+        batch.non_tensor_batch.pop("art_cache")
+        return batch
 
 
 @register_diffusion_loss("diffusion_nft")

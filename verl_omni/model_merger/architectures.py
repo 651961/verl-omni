@@ -15,6 +15,7 @@
 
 _TRANSFORMERS = {
     "QwenImagePipeline": "QwenImageTransformer2DModel",
+    "QwenImage21Pipeline": "QwenImage21Transformer2DModel",
     "QwenImageEditPlusPipeline": "QwenImageTransformer2DModel",
     "StableDiffusion3Pipeline": "SD3Transformer2DModel",
     "FluxPipeline": "FluxTransformer2DModel",

@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Create genuine serialized two-rank CPU DTensors in an isolated Gloo process group."""
+"""Create serialized CPU FSDP or HSDP DTensors in an isolated Gloo process group."""
 
-import sys
+import argparse
 from pathlib import Path
 
 import torch
@@ -23,22 +23,29 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Replicate, Shard, distribute_tensor
 
 
-def save_rank(rank: int, roots: list[str]) -> None:
+def save_rank(rank: int, roots: list[str], hsdp: bool) -> None:
     """Save genuine rank shards for tiny state dictionaries, sharing one Gloo startup."""
-    dist.init_process_group("gloo", init_method=f"file://{Path(roots[0]) / 'rendezvous'}", rank=rank, world_size=2)
+    world_size = 4 if hsdp else 2
+    dist.init_process_group(
+        "gloo", init_method=f"file://{Path(roots[0]) / 'rendezvous'}", rank=rank, world_size=world_size
+    )
     try:
-        mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("fsdp",))
+        mesh = init_device_mesh("cpu", (2, 2) if hsdp else (2,), mesh_dim_names=("ddp", "fsdp") if hsdp else ("fsdp",))
         for directory in roots:
             root = Path(directory)
             state = torch.load(root / "full.pt", weights_only=True)
             result = {}
             for key, tensor in sorted(state.items()):
                 placement = Replicate() if tensor.ndim == 0 else Shard(1 if key == "columns" else 0)
-                result[key] = distribute_tensor(tensor, mesh, [placement])
-            torch.save(result, root / f"model_world_size_2_rank_{rank}.pt")
+                result[key] = distribute_tensor(tensor, mesh, [Replicate(), placement] if hsdp else [placement])
+            torch.save(result, root / f"model_world_size_{world_size}_rank_{rank}.pt")
     finally:
         dist.destroy_process_group()
 
 
 if __name__ == "__main__":
-    mp.spawn(save_rank, args=(sys.argv[1:],), nprocs=2, join=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("roots", nargs="+")
+    parser.add_argument("--hsdp", action="store_true")
+    args = parser.parse_args()
+    mp.spawn(save_rank, args=(args.roots, args.hsdp), nprocs=4 if args.hsdp else 2, join=True)

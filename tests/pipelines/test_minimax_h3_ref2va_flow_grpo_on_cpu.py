@@ -74,6 +74,20 @@ def test_reference_image_short_edge_environment_override_is_restored(monkeypatch
     assert h3_preprocessing.resolve_minimax_h3_reference_image_shape(image) == original_shape
 
 
+@pytest.mark.parametrize("max_area,expected", [(None, (2048, 1024)), (512 * 256, (512, 256))])
+def test_reference_short_edge_honors_native_area_limit(max_area, expected):
+    from vllm_omni.model_executor.models.minimax_h3 import encoder_processing, preprocessing
+
+    image = Image.new("RGB", (1024, 512))
+    original = preprocessing.resolve_minimax_h3_reference_image_shape
+    original_encoder = encoder_processing.resolve_minimax_h3_reference_image_shape
+    with ref2va_reference_image_short_edge(1024):
+        assert preprocessing.resolve_minimax_h3_reference_image_shape(image, max_area=max_area) == expected
+        assert encoder_processing.resolve_minimax_h3_reference_image_shape(image, max_area=max_area) == expected
+    assert preprocessing.resolve_minimax_h3_reference_image_shape is original
+    assert encoder_processing.resolve_minimax_h3_reference_image_shape is original_encoder
+
+
 def test_request_short_edge_overrides_environment_temporarily(monkeypatch):
     import vllm_omni.model_executor.models.minimax_h3.preprocessing as h3_preprocessing
 

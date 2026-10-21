@@ -17,9 +17,25 @@ import diffusers as d
 import torch
 import transformers as t
 
+from verl_omni.model_merger.architectures import _TRANSFORMERS
 from verl_omni.model_merger.fsdp_model_merger import _transformer_class
 
+ARCHITECTURES = sorted(
+    architecture
+    for architecture in _TRANSFORMERS
+    if architecture != "QwenImage21Pipeline" or hasattr(d, "QwenImage21Transformer2DModel")
+)
+
 CONFIGS = {
+    "QwenImage21Pipeline": dict(
+        in_channels=4,
+        out_channels=4,
+        num_layers=1,
+        attention_head_dim=16,
+        num_attention_heads=1,
+        context_in_dim=16,
+        axes_dims_rope=(4, 6, 6),
+    ),
     "QwenImagePipeline": dict(
         in_channels=16,
         out_channels=4,
@@ -127,6 +143,13 @@ def forward_inputs(architecture):
         return torch.randn(*shape, generator=g)
 
     common = dict(encoder_hidden_states=rand(1, 3, 16), timestep=torch.tensor([0.5]), return_dict=False)
+    if architecture == "QwenImage21Pipeline":
+        return dict(
+            common,
+            hidden_states=rand(1, 4, 4),
+            img_shapes=[[(1, 2, 2)]],
+            img_mask=torch.tensor([[False, False, False, True]]),
+        )
     if architecture.startswith("QwenImage"):
         return dict(
             common,
@@ -194,6 +217,41 @@ def run_forward(model, architecture):
 def tiny_pipeline(architecture, transformer):
     """Build complete native pipeline objects with real tiny frozen components."""
     common = dict(transformer=transformer, scheduler=d.FlowMatchEulerDiscreteScheduler())
+    if architecture == "QwenImage21Pipeline":
+        vae = d.AutoencoderKLQwenImage21(
+            base_dim=8,
+            decoder_base_dim=8,
+            z_dim=4,
+            dim_mult=[1],
+            num_res_blocks=1,
+            temperal_downsample=[],
+            latents_mean=[0.0] * 4,
+            latents_std=[1.0] * 4,
+        )
+        encoder = t.Qwen3VLForConditionalGeneration(
+            t.Qwen3VLConfig(
+                text_config=dict(
+                    vocab_size=32,
+                    hidden_size=16,
+                    intermediate_size=32,
+                    num_hidden_layers=1,
+                    num_attention_heads=2,
+                    num_key_value_heads=1,
+                ),
+                vision_config=dict(depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=16),
+            )
+        )
+        tokenizer = t.Qwen2Tokenizer()
+        tokenizer.add_special_tokens({"additional_special_tokens": ["<|image_pad|>"]})
+        processor = t.Qwen3VLProcessor(
+            image_processor=t.Qwen2VLImageProcessor(),
+            video_processor=t.Qwen3VLVideoProcessor(),
+            tokenizer=tokenizer,
+            chat_template="{% for message in messages %}{{ message['content'][0]['text'] }}{% endfor %}",
+        )
+        return d.QwenImage21Pipeline(
+            **common, vae=vae, text_encoder=encoder, processor=processor, sample_sigmas=[1.0, 0.5]
+        )
     if architecture.startswith("QwenImage"):
         vae = d.AutoencoderKLQwenImage(
             base_dim=8,

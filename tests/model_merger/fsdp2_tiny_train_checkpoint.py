@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Two-rank CPU FSDP2 one-step training and production checkpoint saving."""
+"""CPU FSDP2/HSDP one-step training and production checkpoint saving."""
 
 import argparse
 import gc
@@ -68,11 +68,12 @@ def _run_one(architecture: str, root: Path, mesh, lora: bool) -> None:
         before = tuple(value.detach().cpu().clone() for value in _tensor_outputs(model(**forward_inputs(architecture))))
 
     model.train()
-    outputs = _tensor_outputs(model(**forward_inputs(architecture)))
-    loss = sum((value.float() - 0.25).square().mean() for value in outputs)
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad(set_to_none=True)
+    with torch.enable_grad():
+        outputs = _tensor_outputs(model(**forward_inputs(architecture)))
+        loss = sum((value.float() - 0.25).square().mean() for value in outputs)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
     model.eval()
     with torch.no_grad():
@@ -102,15 +103,22 @@ def _run_one(architecture: str, root: Path, mesh, lora: bool) -> None:
 
 
 def main() -> None:
-    """Train and checkpoint each requested architecture in one two-rank process group."""
+    """Train and checkpoint each requested architecture in one process group."""
     parser = argparse.ArgumentParser()
     parser.add_argument("root", type=Path)
     parser.add_argument("architectures", nargs="+")
     parser.add_argument("--lora", action="store_true", help="Train LoRA adapters and also save a LoRA-only checkpoint")
+    parser.add_argument("--fsdp-size", type=int)
     args = parser.parse_args()
     dist.init_process_group("gloo")
     try:
-        mesh = init_device_mesh("cpu", (dist.get_world_size(),), mesh_dim_names=("fsdp",))
+        world_size = dist.get_world_size()
+        if args.fsdp_size is not None and args.fsdp_size < world_size:
+            mesh = init_device_mesh(
+                "cpu", (world_size // args.fsdp_size, args.fsdp_size), mesh_dim_names=("ddp", "fsdp")
+            )
+        else:
+            mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("fsdp",))
         for architecture in args.architectures:
             _run_one(architecture, args.root, mesh, args.lora)
     finally:

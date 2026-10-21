@@ -1,6 +1,6 @@
 # Offline diffusion model publishing
 
-Last updated: 09/30/2026
+Last updated: 10/21/2026
 
 `verl_omni.model_merger` converts an existing FSDP actor checkpoint into a local
 transformer or self-contained inference pipeline. It follows verl's
@@ -18,6 +18,7 @@ registered in the repository, independently of the training algorithm:
 | Architecture | Canonical transformer | `transformer` output | `pipeline` output |
 | --- | --- | --- | --- |
 | Qwen-Image | QwenImageTransformer2DModel | Yes | Yes |
+| Qwen-Image 2.1 / Turbo | QwenImage21Transformer2DModel | Yes | Yes, including processor and `sample_sigmas` |
 | Qwen-Image-Edit Plus | QwenImageTransformer2DModel | Yes | Yes, including processor |
 | SD3 / SD3.5 | SD3Transformer2DModel | Yes | Yes, including all three text encoders/tokenizers |
 | Flux | FluxTransformer2DModel | Yes | Yes |
@@ -47,13 +48,15 @@ Supported checkpoint representations:
 
 - One-dimensional FSDP2 DTensor `Shard(d)` and `Replicate`, including uneven and
   empty shards. All mesh coordinates, shapes, placements and dtypes are checked.
+- Two-dimensional FSDP2 HSDP meshes named `("ddp", "fsdp")`, with a replicated
+  first dimension. One FSDP group is merged after checking that replica shards agree.
 - Ordinary full tensors in a one-rank checkpoint.
 - Ordinary full-shaped tensors in a multi-rank checkpoint only when every replica
   is exactly equal. Plain dim-0 shards are not guessed or concatenated.
 
 LoRA checkpoints can export an adapter or fuse it into complete model weights;
 see [LoRA checkpoints](#lora-checkpoints). Not supported yet: FSDP1 `ShardedTensor`,
-HSDP/FSDP+TP, quantized weights, unaudited custom pipelines, architectures
+FSDP+TP, quantized weights, unaudited custom pipelines, architectures
 outside the audited table, BAGEL and Omni publishing. Standard Transformers can
 continue using `python -m verl.model_merger`; delegation through this entrypoint
 is a follow-up. A training engine named `diffusers` does not establish that its
@@ -112,6 +115,14 @@ python -m verl_omni.model_merger test \
   --backend fsdp \
   --test_hf_dir "$OUTPUT"
 ```
+
+For Qwen-Image 2.1 / Turbo, use the matching original pipeline as
+`--base_model` and add `--dtype bfloat16` for BF16 inference weights. The output
+contains the merged trained `transformer` safetensors and the original frozen
+components, processor and sampling configuration. Pass the complete output
+directory to vLLM-Omni as its model path. Turbo's fixed `sample_sigmas` is
+preserved; use CFG=1. The original FSDP checkpoint remains available for training
+resumption.
 
 For a standalone Diffusers component:
 
@@ -305,8 +316,8 @@ through the native vLLM-Omni `MiniMaxH3DiTModel.load_weights()` path.
 
 CPU tests also exercise standalone genuine DTensor serialization, fresh-process
 CLI export, tiny complete pipeline reload and transformer-forward parity across
-the eight architecture identities above.
-All eight also have dtype/fp32-island and incomplete-state checks. Seven
+the architecture identities above.
+All also have dtype/fp32-island and incomplete-state checks. The standard
 Diffusers-compatible pipelines exercise their canonical complete
 `from_pretrained()` loader; MiniMax H3 exercises exact native schema coverage,
 QKV interleaving, GEGLU reordering, rope synthesis, copied-component integrity,
@@ -322,11 +333,11 @@ TORCH_COMPILE_DISABLE=1 TORCHINDUCTOR_DISABLE=1 OMP_NUM_THREADS=1 \
   tests/model_merger/test_lora_fusion_on_cpu.py -v
 ```
 
-The LoRA tests cover all eight architectures with full-state and LoRA-only
+The LoRA tests cover the registered architectures with full-state and LoRA-only
 checkpoints, both single-rank and two-rank DTensors. They compare fused tensors
 with PEFT's own `merge()`, reload without adapter layers, check fixed-input
 forward parity and exercise the dtype/fp32-island policy. Pipeline tests cover
-both layouts for all seven Diffusers-compatible pipelines and verify copied
+both layouts for the Diffusers-compatible pipelines and verify copied
 frozen components, including Wan's second transformer. MiniMax H3 tests check
 full-state native conversion and rejection of LoRA-only native pipeline export.
 

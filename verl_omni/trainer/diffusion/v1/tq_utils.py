@@ -139,7 +139,7 @@ def _to_object_array(value: Any) -> np.ndarray:
     return arr
 
 
-def _stack_field(value: Any, padding: float = 0.0) -> torch.Tensor | None:
+def _stack_field(value: Any, padding: float = 0.0, *, pad_all_dims: bool = False) -> torch.Tensor | None:
     """Normalize a TransferQueue-returned field into a stacked tensor.
 
     Diffusion worker outputs are pre-padded to fixed shapes (prompt_length for
@@ -159,6 +159,14 @@ def _stack_field(value: Any, padding: float = 0.0) -> torch.Tensor | None:
         tensors = [v if isinstance(v, torch.Tensor) else torch.as_tensor(v) for v in value]
         if not tensors:
             return None
+        if pad_all_dims and all(t.ndim == tensors[0].ndim for t in tensors) and tensors[0].ndim >= 2:
+            # Ragged image canvases and latent token counts can vary on more
+            # than axis zero. This also preserves four-channel RGBA responses.
+            shape = tuple(max(t.shape[axis] for t in tensors) for axis in range(tensors[0].ndim))
+            result = tensors[0].new_full((len(tensors), *shape), padding)
+            for row, tensor in enumerate(tensors):
+                result[(row, *(slice(0, n) for n in tensor.shape))] = tensor
+            return result
         return torch.nn.utils.rnn.pad_sequence(tensors, batch_first=True, padding_value=padding)
     return torch.as_tensor(value)
 
@@ -197,7 +205,16 @@ def diffusion_tq_batch_to_dataproto(
         padding = float(pad_token_id) if field == "prompts" else 0.0
         stacked = None
         try:
-            stacked = _stack_field(value, padding=padding)
+            if field.startswith(MEDIA_ARTIFACT_FIELD_PREFIX):
+                # Named media must retain each sample's exact geometry, including
+                # frame/audio/token lengths; padded pixels are not valid artifacts.
+                if isinstance(value, torch.Tensor) and not value.is_nested:
+                    stacked = value
+                else:
+                    value = list(value.unbind()) if isinstance(value, torch.Tensor) else value
+                    stacked = torch.stack(list(value))
+            else:
+                stacked = _stack_field(value, padding=padding, pad_all_dims=field == "responses")
         except (TypeError, ValueError, RuntimeError):
             # Non-numeric/object fields are forwarded via non_tensor_batch.
             stacked = None

@@ -236,16 +236,23 @@ class TestMiniMaxH3FlopsDPGather:
             "num_forward_passes": 2,
         }
 
+        calls = []
+
         def fake_all_gather_object(gathered, value, group):
             # Rank 0 contributes the local value; rank 1 a distinct payload.
-            gathered[0] = list(value)
-            gathered[1] = [item + 100 for item in value]
+            calls.append(value)
+            gathered[0] = value
+            gathered[1] = {
+                key: [item + 100 for item in field] if isinstance(field, list) else field
+                for key, field in value.items()
+            }
 
         monkeypatch.setattr(dfc.torch.distributed, "is_initialized", lambda: True)
         monkeypatch.setattr(dfc.torch.distributed, "get_world_size", lambda group=None: 2)
         monkeypatch.setattr(dfc.torch.distributed, "all_gather_object", fake_all_gather_object)
 
         gathered = allgather_diffusion_flops_meta(meta, dp_group=object())
+        assert len(calls) == 1
 
         # Every per-sample list field is flattened across both ranks in order.
         assert gathered["latent_seqlens"] == [10, 110]

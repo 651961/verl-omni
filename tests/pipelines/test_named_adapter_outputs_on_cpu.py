@@ -709,3 +709,96 @@ def test_image_forward_keeps_preview_request_union_from_later_request(adapter, r
         assert ("image_preview" in row) == request_preview
         torch.testing.assert_close(row["image_latent"], latents[index])
         torch.testing.assert_close(output.trajectory_latents, trajectory[index : index + 1])
+
+
+@pytest.mark.parametrize("output_type,preview", [("pt", True), ("latent", False), ("latent", True)])
+@pytest.mark.parametrize("execution", ["forward", "step"])
+def test_qwen21_art_named_rgba_and_latents(monkeypatch, output_type, preview, execution):
+    pytest.importorskip("vllm_omni.diffusion.models.qwen_image_21.pipeline_qwen_image_21")
+    from vllm_omni.diffusion.worker.request_batch import split_diffusion_output_by_request as native_split
+
+    from verl_omni.pipelines.qwen_image21_diffusion_art.vllm_omni_rollout_adapter import (
+        QwenImage21DiffusionARTPipeline,
+        QwenImage21Pipeline,
+    )
+
+    pipeline = object.__new__(QwenImage21DiffusionARTPipeline)
+    pixels = torch.linspace(-1, 1, 4 * 32 * 64).reshape(1, 4, 32, 64)
+    latents = torch.randn(1, 8, 16)
+    decodes = []
+
+    def decode(self, value, height, width, kind):
+        decodes.append(kind)
+        return DiffusionOutput(output=value if kind == "latent" else pixels)
+
+    monkeypatch.setattr(QwenImage21Pipeline, "_decode_latents", decode)
+    sampling = OmniDiffusionSamplingParams(
+        output_type=output_type,
+        height=32,
+        width=64,
+        extra_args={"art_capture_trajectory": False, "requested_outputs": ["image_preview"] if preview else []},
+    )
+    request = OmniDiffusionRequest(request_id="qwen21", prompt={"prompt_ids": [1]}, sampling_params=sampling)
+    batch = DiffusionRequestBatch(requests=[request])
+
+    def forward(self, req):
+        return native_split(self._decode_latents(latents, 32, 64, output_type), req, num_outputs_per_prompt=1)
+
+    monkeypatch.setattr(QwenImage21Pipeline, "forward", forward)
+    if execution == "forward":
+        native = pipeline.forward(batch)[0]
+    else:
+        state = SimpleNamespace(sampling=sampling, latents=latents, extra={})
+        native = pipeline.post_decode(state)
+    assert decodes == ["pt" if preview and output_type == "latent" else output_type]
+    converted = DiffusionStrategy(SimpleNamespace(global_steps=0, model_config=None)).process_output(
+        _format(native, "QwenImage21Pipeline"), None, {"output_type": output_type}
+    )
+    assert converted.primary_artifact == ("image_latent" if output_type == "latent" else "image_preview")
+    torch.testing.assert_close(converted.artifacts["image_latent"].data, latents[0])
+    assert "art_cache" not in converted.extra_fields
+    assert ("image_preview" in converted.artifacts) == preview
+    if preview:
+        torch.testing.assert_close(
+            converted.artifacts["image_preview"].data, quantize_pixels(pixels[0], "minus_one_one", context="test")
+        )
+        assert converted.artifacts["image_preview"].data.shape == (4, 32, 64)
+
+
+def test_h3_art_named_video_audio_survive_native_postprocessing(monkeypatch):
+    from contextlib import nullcontext
+
+    from verl_omni.pipelines.minimax_h3_diffusion_art.vllm_omni_rollout_adapter import (
+        MiniMaxH3DiffusionARTPipeline,
+        MiniMaxH3Pipeline,
+        native_pipeline,
+    )
+
+    pipeline = object.__new__(MiniMaxH3DiffusionARTPipeline)
+    pipeline._art_hook = pipeline._art_cache = pipeline._art_capture = None
+    pipeline._reference_image_short_edge = 256
+    monkeypatch.setattr(pipeline, "_ensure_prompt_text", lambda request: None)
+    module = importlib.import_module(type(pipeline).__module__)
+    monkeypatch.setattr(module, "ref2va_reference_image_short_edge", lambda value: nullcontext())
+    video = torch.arange(1 * 5 * 32 * 64 * 3).reshape(1, 5, 32, 64, 3).to(torch.uint8)
+    audio = torch.randn(1, 2, 800)
+
+    def forward(self, request):
+        self._art_cache = {"policy_version": 7, "sentinel": torch.ones(1)}
+        return DiffusionOutput(output=(video, audio))
+
+    monkeypatch.setattr(MiniMaxH3Pipeline, "forward", forward)
+    sampling = OmniDiffusionSamplingParams(frame_rate=24, extra_args={})
+    request = SimpleNamespace(request_id="h3", requests=[SimpleNamespace(sampling_params=sampling)])
+    native = pipeline.forward(request)
+    processor = native_pipeline.get_minimax_h3_post_process_func(SimpleNamespace())
+    assert processor(native.output) is native.output
+    converted = DiffusionStrategy(SimpleNamespace(global_steps=0, model_config=None)).process_output(
+        _format(native, "MiniMaxH3Pipeline"), None, {"output_type": "pt"}
+    )
+    torch.testing.assert_close(converted.artifacts["video_preview"].data, video[0].permute(0, 3, 1, 2))
+    torch.testing.assert_close(converted.artifacts["audio"].data, audio[0])
+    assert converted.artifacts["video_preview"].spec.fps == 24
+    assert converted.artifacts["audio"].spec.sample_rate == 32000
+    assert converted.extra_fields["art_cache"]["policy_version"] == 7
+    assert pipeline._art_cache is None

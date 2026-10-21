@@ -24,14 +24,13 @@ from pathlib import Path
 
 import pytest
 import torch
-from model_fixtures import run_forward, tiny_transformer
+from model_fixtures import ARCHITECTURES, run_forward, tiny_transformer
 from peft import LoraConfig, get_peft_model
 from peft.tuners.tuners_utils import BaseTunerLayer
 from safetensors.torch import load_file, save_file
 from test_architectures_on_cpu import _case, _h3_native_state, _h3_pipeline_case, _tensor_outputs
 
 from verl_omni.model_merger import ModelMergerConfig, merge_model, validate_artifact
-from verl_omni.model_merger.architectures import _TRANSFORMERS
 from verl_omni.model_merger.base_model_merger import generate_config_from_args, parse_args
 from verl_omni.model_merger.fsdp_model_merger import _pipeline_class
 from verl_omni.model_merger.lora import fuse_lora, plan_lora_fusion
@@ -97,7 +96,7 @@ def _published_state(root: Path, weights_name=None):
 
 
 @pytest.mark.parametrize("lora_only", [False, True], ids=["full_state", "lora_only"])
-@pytest.mark.parametrize("architecture", sorted(_TRANSFORMERS))
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
 def test_lora_component_matches_peft_merge_and_actor_forward(tmp_path, architecture, lora_only):
     config, actor = _lora_case(tmp_path, architecture, lora_only=lora_only)
     expected = run_forward(actor, architecture)
@@ -140,7 +139,7 @@ def test_lora_fusion_accepts_fsdp_wrapped_peft_state(tmp_path, lora_only):
 def lora_dtensor_cases(tmp_path_factory):
     root = tmp_path_factory.mktemp("lora-dtensors")
     cases = {}
-    for architecture in sorted(_TRANSFORMERS):
+    for architecture in ARCHITECTURES:
         if architecture == "BooguImagePipeline" and importlib.util.find_spec("boogu") is None:
             continue
         for lora_only in (False, True):
@@ -166,7 +165,7 @@ def lora_dtensor_cases(tmp_path_factory):
 
 
 @pytest.mark.parametrize("lora_only", [False, True], ids=["full_state", "lora_only"])
-@pytest.mark.parametrize("architecture", sorted(_TRANSFORMERS))
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
 def test_lora_two_rank_dtensor_checkpoints(architecture, lora_only, request):
     if architecture == "BooguImagePipeline":
         pytest.importorskip("boogu")
@@ -180,7 +179,9 @@ def test_lora_two_rank_dtensor_checkpoints(architecture, lora_only, request):
 
 
 @pytest.mark.parametrize("lora_only", [False, True], ids=["full_state", "lora_only"])
-@pytest.mark.parametrize("architecture", sorted(_TRANSFORMERS.keys() - {"MiniMaxH3Pipeline"}))
+@pytest.mark.parametrize(
+    "architecture", [architecture for architecture in ARCHITECTURES if architecture != "MiniMaxH3Pipeline"]
+)
 def test_lora_pipeline_reloads_with_unchanged_frozen_components(tmp_path, architecture, lora_only):
     config, actor = _lora_case(tmp_path, architecture, pipeline=True, lora_only=lora_only)
     before = inventory(Path(config.base_model), tree_files(Path(config.base_model)))
@@ -389,7 +390,7 @@ def test_lora_fusion_overflow_fails_closed(dtype, magnitude):
         fuse_lora(base, a, b, 2)
 
 
-@pytest.mark.parametrize("architecture", sorted(_TRANSFORMERS))
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
 @pytest.mark.parametrize("lora_only", [False, True], ids=["full_state", "lora_only"])
 def test_lora_dtype_policy_and_fp32_islands(tmp_path, architecture, lora_only):
     config, actor = _lora_case(tmp_path, architecture, lora_only=lora_only)
@@ -403,10 +404,10 @@ def test_lora_dtype_policy_and_fp32_islands(tmp_path, architecture, lora_only):
     torch.testing.assert_close(_published_state(result.output_dir), expected, rtol=0, atol=0)
 
 
-@pytest.fixture(scope="module")
-def fsdp2_lora_cases(tmp_path_factory):
+@pytest.fixture(scope="module", params=[False, True], ids=["fsdp", "hsdp"])
+def fsdp2_lora_cases(tmp_path_factory, request):
     tmp_path = tmp_path_factory.mktemp("fsdp2-lora-training")
-    architectures = sorted(_TRANSFORMERS)
+    architectures = ARCHITECTURES.copy()
     if importlib.util.find_spec("boogu") is None:
         architectures.remove("BooguImagePipeline")
     cases = {}
@@ -434,12 +435,13 @@ def fsdp2_lora_cases(tmp_path_factory):
             "-m",
             "torch.distributed.run",
             "--standalone",
-            "--nproc_per_node=2",
+            f"--nproc_per_node={4 if request.param else 2}",
             str(Path(__file__).with_name("fsdp2_tiny_train_checkpoint.py")),
             str(tmp_path),
             *architectures,
             "--lora",
-        ],
+        ]
+        + (["--fsdp-size", "2"] if request.param else []),
         env=env,
         capture_output=True,
         text=True,
@@ -450,11 +452,11 @@ def fsdp2_lora_cases(tmp_path_factory):
     return cases
 
 
-@pytest.mark.parametrize("architecture", sorted(_TRANSFORMERS))
-def test_fsdp2_lora_training_checkpoints_fuse_to_the_trained_actor(architecture, request):
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
+def test_fsdp2_lora_training_checkpoints_fuse_to_the_trained_actor(architecture, fsdp2_lora_cases):
     if architecture == "BooguImagePipeline":
         pytest.importorskip("boogu")
-    config = request.getfixturevalue("fsdp2_lora_cases")[architecture]
+    config = fsdp2_lora_cases[architecture]
     root = Path(config.local_dir).parent
     evidence = torch.load(root / "expected.pt", weights_only=True)
     assert torch.isfinite(torch.tensor(evidence["loss"]))

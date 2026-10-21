@@ -98,6 +98,7 @@ def _register_adapter(monkeypatch):
         algorithm=algorithm,
         external_lib=None,
         enable_gradient_checkpointing=True,
+        gradient_checkpointing_save_ops=[],
         lora_rank=0,
     )
 

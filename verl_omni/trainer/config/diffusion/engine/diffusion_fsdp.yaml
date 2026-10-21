@@ -52,3 +52,15 @@ strategy: fsdp
 
 # Mixed precision training param dtype. Options: ["bfloat16", "float16"]
 dtype: bfloat16
+
+# FP32 master parameters above, BF16 forward/backward compute, FP32 reduction.
+mixed_precision:
+
+  # FSDP gathered compute parameters.
+  param_dtype: bf16
+
+  # Gradient accumulation and communication.
+  reduce_dtype: fp32
+
+  # Non-parameter buffers.
+  buffer_dtype: fp32
