@@ -28,7 +28,7 @@ SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 ENTRYPOINT []
 
 # Step 1: pin the accelerator packages from the base. Neither PyPI nor the core
-# vllm==0.30.0 pin knows about the +xpu builds, so a resolver would otherwise
+# vllm==0.32.0 pin knows about the +xpu builds, so a resolver would otherwise
 # swap in CUDA or CPU wheels.
 RUN python3 - > /opt/xpu-constraints.txt <<'PY'
 from importlib.metadata import version, PackageNotFoundError

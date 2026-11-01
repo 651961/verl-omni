@@ -6,7 +6,7 @@ VeRL-Omni defaults to **FSDP2** as the training engine for the policy and refere
 
 ## Installing VeOmni alongside vLLM 0.30.0
 
-VeOmni 0.1.12's `gpu` extra pins `torch==2.11.0+cu130`, which conflicts with the `torch==2.13.0` pulled in by `vllm==0.30.0`. A plain `uv pip install veomni[gpu]==0.1.12` therefore fails dependency resolution.
+VeOmni 0.1.12's `gpu` extra pins `torch==2.11.0+cu130`, which conflicts with the `torch==2.13.0` pulled in by `vllm==0.32.0`. A plain `uv pip install veomni[gpu]==0.1.12` therefore fails dependency resolution.
 
 Install the base VeOmni package without dependency resolution so the existing
 torch/vLLM stack is preserved, then add its media runtime dependencies

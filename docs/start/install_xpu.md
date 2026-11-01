@@ -34,7 +34,7 @@ Build context is controlled by the repo-root [`.dockerignore`](https://github.co
 
 ### Install into an existing vLLM XPU environment
 
-The same steps work in any environment that already has `vllm==0.30.0+xpu`.
+The same steps work in any environment that already has `vllm==0.32.0+xpu`.
 Pin the XPU builds first, so the resolver cannot replace them with CUDA or CPU wheels:
 
 ```bash

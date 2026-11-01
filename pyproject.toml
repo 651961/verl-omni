@@ -23,7 +23,7 @@ dependencies = [
     "cachetools",
     "codetiming",
     "datasets>=2.20.0",
-    "diffusers>=0.40.0",
+    "diffusers>=0.41.0",
     "dill",
     "hydra-core",
     "imageio[ffmpeg]>=2.37.2",
@@ -36,9 +36,7 @@ dependencies = [
     "safetensors>=0.4.5",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
     "torchdata",
-    # TODO: Remove this cap after the Qwen3-Omni adapter and tests support the
-    # FSDP `_no_split_modules` metadata change introduced in Transformers 5.15.0.
-    "transformers>=5.13.0,<=5.14.1",
+    "transformers>=5.16.1,<5.20.0",
     "wandb",
     "packaging>=20.0",
     "uvicorn",
@@ -48,8 +46,8 @@ dependencies = [
     "mathruler",
     "tensorboard",
     "TransferQueue==0.1.9",
-    "vllm==0.30.0",
-    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@12e9280010afc41ce5c6a1f46900fc329cf08377",
+    "vllm==0.32.0",
+    "vllm-omni @ git+https://github.com/vllm-project/vllm-omni.git@5917730a4b02aedb44d374173cdc1b10484ccd52",
     "verl @ git+https://github.com/verl-project/verl.git@fefb080262e1c015a0ea05f958822a6a512dc795",
 ]
 
@@ -72,7 +70,7 @@ fa2 = [
     "flash-attn>=2.8.3",
 ]
 gpu = [
-    "kernels==0.16.0",
+    "kernels==0.16.1",
     "liger-kernel",
     "quack-kernels>=0.6.5",
     "cupy-cuda13x",
@@ -206,6 +204,7 @@ verl_omni = [
 [tool.uv]
 override-dependencies = [
     "accelerate>=1.14.0",
-    "kernels==0.16.0",
-    "transformers>=5.13.0,<=5.14.1",
+    "diffusers>=0.41.0",
+    "kernels==0.16.1",
+    "transformers>=5.16.1,<5.20.0",
 ]
